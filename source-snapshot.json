@@ -2,15 +2,15 @@
   "schema": 1,
   "date": "2026-10-13",
   "kind": "experimental-source-development-snapshot",
-  "shared_revision": 136,
-  "private_reference_binary_sha256": "bac226bfcf9d9794d21bdd6215bd3495c1732842707cc0feaf6efe4ee2a2e864",
+  "shared_revision": 138,
+  "private_reference_binary_sha256": "c8a465e9729298ee16c09b9c0926931bfb61209ed4769291d332a1e0f1f9d0ba",
   "qemu_version": "10.2.4",
   "original_algorithms_accepted": false,
   "camera_h265_recording_accepted": false,
   "camera_r3d_recording_accepted": false,
-  "device_regression_guests": 26,
-  "device_regression_checks": 162,
-  "original_input_recipe_checks": 76,
+  "device_regression_guests": 60,
+  "device_regression_checks": 214,
+  "original_input_recipe_checks": 82,
   "compiled_source_sha256": {
     "nikon-z9-thumbnail-nv16.h": "3af60d459a994401e0a847b0dc3746b5a0207ee8af72eedc8ca752843561504f",
     "nikon-expeed-motion.h": "d30fca0dbf96a65f634ab8305156d148f149c45a0d8cb86170ea0d06e3ed1bde",
@@ -25,7 +25,7 @@
     "nikon-z9-wave5.h": "970cea92617a20e9394f24fd88b517a93929178706a4c6cf35226b9a45b188fa",
     "nikon-expeed-lossless.h": "6f6ef0da9d01571dcf3470ccf1b160fb1c50c5859b6b70ef78d63b4bc97e9100",
     "nikon-z9-video-raw.h": "7a64218ffc0ad571a2702c92fa7168669f3b418f517146114f47dcf518a3de38",
-    "nikon-z9-lab.c": "80b2d76af8b1522603b603126730e9528fce5e9516eacb12ab20067636ac8e5b",
+    "nikon-z9-lab.c": "409cb1385e597403871b0c8bb43461e06a07451362428279ca4b4dfd837296bb",
     "nikon-expeed-correction.h": "6718b4c8f190960db588e42958c18db125fffd8cc6d68649be8d20d64d33ec77",
     "nikon-z9-jpeg.h": "48a9619eae30de870a436baff5e698061c30df88d8fd66a98ae8ba7dc5bc94e6"
   },
@@ -41,7 +41,7 @@
     "qemu/nikon-z9-capture-nv16.h": "c795136e5531992d9f15f43afa88c4b0180d9902564d3644936ab674d89a8c53",
     "qemu/nikon-z9-d980.h": "0593ee7090f8cf4c851ab177722ca91473c1ebf15a951e241fcbcd320f4b9cee",
     "qemu/nikon-z9-jpeg.h": "562ae7a1ebbc3fa5c7631bbb5a885630bac0bb2d8479738e90f3c4cbce7f6798",
-    "qemu/nikon-z9-lab.c": "80b2d76af8b1522603b603126730e9528fce5e9516eacb12ab20067636ac8e5b",
+    "qemu/nikon-z9-lab.c": "429243472b527d95096f7609f1bb29c71c415e5db2fb46f59c8f289a32f4b338",
     "qemu/nikon-z9-pcie.h": "0902b20b2cd34a3e8469df6b41f97f912054037c8863cca8575edb73424315fa",
     "qemu/nikon-z9-pixels.h": "6bfe4f26138015f758bf16ff1bc6040870749b91e34adcc60cb1498e8000637d",
     "qemu/nikon-z9-thumbnail-nv16.h": "3af60d459a994401e0a847b0dc3746b5a0207ee8af72eedc8ca752843561504f",
@@ -50,7 +50,7 @@
     "qemu/nikon-zr-lab.c": "ac1919fb922aed4eb04c630f831ecdea21a23098b132ba59a829d966eabb2b46",
     "qemu/prepare_source.py": "171c5348f52999de4f936b39f090d840b765092abbc1bb4fe417d3182bfdc9ed"
   },
-  "public_validation": {
+  "previous_shared136_public_validation": {
     "build_completed": true,
     "binary_sha256": "61b21537e2f5cfc6a1d6fb18a727c81539c1c219b56908dc4a5e4b18448915f4",
     "firmware_free_python_tests": 13,
@@ -68,5 +68,40 @@
       "error": "bounded key sequence not completely consumed",
       "default_preview_reuses_current_photo_devices_instead": true
     }
-  }
+  },
+  "status_peer_host_checks": 134,
+  "public_validation": {
+    "build_completed": true,
+    "binary_sha256": "09b5406f045bbd32a306983955a419a3ea02cb623cc0f8ba4830e5c0f2863025",
+    "firmware_free_python_tests": 16,
+    "c_pixel_checks_passed": true,
+    "service_core_checks": 13,
+    "firmware_free_realizations": 4,
+    "realized_models": [
+      "nikon-z9-lab",
+      "nikon-zr-lab"
+    ],
+    "full_native_photo_port_requalified": false,
+    "full_native_movie_port_requalified": false
+  },
+  "latest_private_native_video": [
+    {
+      "run": "zr-qemu-513-main10-selected-header-whole",
+      "accepted": false,
+      "error": "TimeoutError('Original VIDEO dispatch did not settle to 1 after input state98')",
+      "private_build_sha256": "c8a465e9729298ee16c09b9c0926931bfb61209ed4769291d332a1e0f1f9d0ba",
+      "codec_input_bytes": 0,
+      "codec_pictures": 0,
+      "retained_starts": 0
+    },
+    {
+      "run": "zr-qemu-514-r3d-selected-header-whole",
+      "accepted": false,
+      "error": "TimeoutError('Original VIDEO dispatch did not settle to 0 after input state82')",
+      "private_build_sha256": "c8a465e9729298ee16c09b9c0926931bfb61209ed4769291d332a1e0f1f9d0ba",
+      "codec_input_bytes": 0,
+      "codec_pictures": 0,
+      "retained_starts": 0
+    }
+  ]
 }

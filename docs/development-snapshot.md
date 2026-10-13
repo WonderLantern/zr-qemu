@@ -1,3 +1,7 @@
+# Current: shared138
+
+See [the shared138 update](shared138.md) for current control changes, validation and limits. The shared136 section below preserves its historical scope.
+
 # Shared EXPEED7 development snapshot — 2026-10-13
 
 This source snapshot updates the shared Z9 C5.32 / ZR C1.11 model to the
@@ -32,11 +36,11 @@ Git dependencies of these standalone repositories.
 | --- | --- |
 | Earlier standalone Z9 public run 564 | Original shutter, full RAW transport, fresh live view and two real PHOTO menu round trips; all 45,705,600 samples matched LibRaw. This tested the previous published revision, not every new opt-in. |
 | Shared lossless14 photo runs Z9 572 / ZR 424 | Four actual NEFs; LibRaw and Adobe decoding matched all 140,408,320 producer samples. This is functional format/pixel acceptance, not execution of Nikon's original compression algorithm. |
-| Current shared136 device regressions | 26 stopped diagnostic guests, 162 checks covering both model identities and guarded idle reset ownership. Original reset routines were exercised only in labeled synthetic diagnostics. |
+| Earlier shared136 device regressions | 26 stopped diagnostic guests, 162 checks covering both model identities and guarded idle reset ownership. Original reset routines were exercised only in labeled synthetic diagnostics. |
 | ZR shutter recipe contract | 76 checks. VIDEO HALF focuses; held HALF+FULL starts, a later FULL stops. Main shutter is not aliased to the movie button. |
-| Latest native Main10 run 505 | 6,898 complete trace records; 98 input states consumed. One idle pulse reset retired old causes; the second START timed out. 0 codec picture bytes / 0 pictures. |
-| Latest native R3D run 506 | 418 complete trace records; 82 input states consumed; STOP timed out. 0 codec picture bytes / 0 pictures. AVC initialization is not R3D encoding. |
-| Both latest virtual cards | Clean read-only exFAT audit, only NIKON001.DSC. No camera-written playable movie. |
+| Earlier native Main10 run 505 | 6,898 complete trace records; 98 input states consumed. One idle pulse reset retired old causes; the second START timed out. 0 codec picture bytes / 0 pictures. |
+| Earlier native R3D run 506 | 418 complete trace records; 82 input states consumed; STOP timed out. 0 codec picture bytes / 0 pictures. AVC initialization is not R3D encoding. |
+| Both earlier virtual cards | Clean read-only exFAT audit, only NIKON001.DSC. No camera-written playable movie. |
 
 Native source forwarding reached an indirect call that returned 1; that is
 request delivery, not image acceptance. Some earlier hook names called
@@ -84,7 +88,7 @@ it is not a legal oracle. See NOTICE.md and docs/publication.md.
 The public Z9 `tools/capture.py --profile lossless14 --audit` ports the latest two-photo native workflow and full per-file/sample auditor. The default compatibility profile retains its previous transport scope. See [capture](capture.md).
 
 
-## Standalone snapshot packaging checks
+## Earlier shared136 standalone packaging checks
 
 Both standalone overlays compiled with the public QEMU builder. The shared
 Python suite (13 tests), C pixel checks, firmware-free realization and 13

@@ -526,6 +526,13 @@ def mode_input_ready(g,stage,waveform):
 
 def service_mcu(g,seconds,*,observer=None,key_input=False):
     from service_z9_mcu import Peer
+    if g.data.get('battery_query_peer'):
+        class BatteryQueryPeer(Peer):
+            def queue_reply(self,wire):
+                from zr_battery_query_peer import queue_reply
+                if queue_reply(self,wire):return
+                super().queue_reply(wire)
+        Peer=BatteryQueryPeer
     peer = Peer(g,bindings=BINDINGS,config_reply=True,all_mode_replies=True)
     if g.data.get('rtc_status_input'):
         from rtc_mcu_input import diagnostic_status
@@ -1147,6 +1154,8 @@ def main():
     ap.add_argument('--nor',action='store_true',help='existing volatile shared NOR model; original input file stays read only')
     ap.add_argument('--sd-empty',action='store_true',help='explicit inactive card-detect input; no media model')
     ap.add_argument('--battery',action='store_true',help='synthetic family4/type3 112-byte source1 status')
+    ap.add_argument('--battery-query-peer',action='store_true',help='request-bound declared status; no image/codec completion')
+    ap.add_argument('--retained-header-start',action='store_true',help='retired selected video header START; pixel readiness stays strict')
     ap.add_argument('--battery-input',choices=('zero','source1'),default='source1',
                     help='explicit byte4 variant; source1 is a label, not verified battery semantics')
     ap.add_argument('--key-input',action='store_true',help='candidate family2/type1 complete state; requires peer')
@@ -1897,6 +1906,10 @@ def main():
     if args.shared_mvd_model:
         props+=',config1524-model=on,config1524-control100-input=0,engine1524-control-model=on,engine1524-mvd-model=on'
     if args.nor:props+=',nor-model=on'
+    if args.retained_header_start:
+        if not (args.shared_z9_build and args.engine1543_video_control):
+            ap.error('retained header START requires shared video header control')
+        props+=',engine1543-retained-start-model=on'
     if args.service_core_events:props+=',service-core-event-model=on'
     g = ZRGuest(args.name,props,intercept_irq=False,ram_mib=1024,
         machine='nikon-zr-lab',firmware=MAIN,firmware_sha=MAIN_SHA,runtime_log=True,**build_options)
@@ -1966,6 +1979,9 @@ def main():
         diagnostic_bank1_input_period_ms=args.diagnostic_bank1_input_period_ms,
         capture_tasks=args.tasks,lcd_control_peer=args.lcd_control_peer,
         orientation_peer=args.orientation_peer,secondary_model=args.secondary_model)
+    if args.battery_query_peer and not (args.battery and args.mcu_peer):
+        ap.error('battery query peer requires boot battery input and MCU peer')
+    g.data['battery_query_peer']=args.battery_query_peer
     g.data['battery_input_variant']=args.battery_input if args.battery else None
     g.data['trace_sequence_resources']=args.trace_sequence_resources
     g.data['trace_sequence_watchdog']=args.trace_sequence_watchdog
@@ -2102,6 +2118,7 @@ def main():
                 try:settle(g,1,observer=power_observer)
                 finally:power_observer.close()
                 body=bytearray(112);body[0]=3;body[4]=int(args.battery_input=='source1')
+                g.data['battery_status_input_body_hex']=body.hex()
                 with delivery_window(g,'battery-status-delivery'):
                     deliver(g,frames(body,family=4)[0],prefix='zr-battery-',bindings=BINDINGS)
                     cpu,regs=at(g,0x40ed141c)

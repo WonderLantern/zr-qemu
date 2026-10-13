@@ -492,7 +492,8 @@ struct NikonZ9State {
     unsigned raw_pipeline_width[3], raw_pipeline_height[3], raw_pipeline_stride[3];
     bool raw_pipeline_uv_half[3];
     bool engine1543_capture_control_model;
-    bool engine1543_video_control_model;
+    bool engine1543_video_control_model, engine1543_retained_start_model, engine1543_video_program_known;
+    uint64_t engine1543_retained_starts;
     bool capture_stream_rearm_model;
     uint64_t capture_stream_rearms;
     bool engine1543_control_model;
@@ -13412,14 +13413,57 @@ static char *get_capture_stream_rearm_state(Object *obj, Error **errp)
         s->capture_stream_rearm_model ? "true" : "false", s->capture_stream_rearms);
 }
 
+/* Native509 preserves its own complete header while adjacent source/supplier
+ * settings change. Header START is not pixel readiness. This fallback only
+ * reuses a previously accepted strict video program with metadata and selected descriptor words equal
+ * (apart from the original low-two-bit control RMW), no live header/backend
+ * owner and no output pending. Original pixel/DMA admission stays unchanged. */
+static bool engine1543_retained_video_start(NikonZ9State *s, unsigned j, uint64_t value)
+{
+    if (!s->engine1543_retained_start_model || !s->engine1543_video_control_model ||
+        !s->engine1543_capture_control_model || !s->engine1543_video_program_known ||
+        j!=1 || value!=0x101 || s->engine1543_active[j] || s->engine1543_held[j] ||
+        s->engine1543_valid[j]!=15 || s->engine1543_buffer_valid[j]!=UINT64_C(0x000f000f000f000f) ||
+        s->capture_nv16_requested || s->engine1542_pending[11] ||
+        s->video_raw_packet_owned || s->video_raw_frame_ready || s->engine152c_stream_pending ||
+        s->engine1530_active || (s->engine1530_config[0x1c/4]&12)) { return false; }
+    const uint32_t *c=s->engine1542_config[11],*prior=s->engine1543_latched[j];
+    if ((c[1]&~3u)!=0x100 || (prior[1]&~3u)!=0x100 || c[2]!=0x302 || c[3] || c[4]!=0x29) { return false; }
+    /* The written bitmap is four rows of16 words; native511 differs only
+     * in inactive stale slots above400. Never modify those stored bytes or
+     * treat them as current descriptors. Selected low/high words stay exact. */
+    for (unsigned word=0;word<ARRAY_SIZE(s->engine1543_latched[j]);word++) {
+        unsigned off=word*4;
+        bool selected=off<0x200;
+        if (off>=0x200 && off<0x3c0 && (off&0x7f)<0x40) {
+            unsigned bit=((off-0x200)/0x80)*16+(off&0x7f)/4;
+            selected=(s->engine1543_buffer_valid[j]&(UINT64_C(1)<<bit))!=0;
+        }
+        if (selected && word!=1 && c[word]!=prior[word]) { return false; }
+    }
+    return true;
+}
+static bool get_engine1543_retained_start_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->engine1543_retained_start_model; }
+static void set_engine1543_retained_start_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"retained header START model immutable after realization");return;
+    }
+    s->engine1543_retained_start_model=value;
+}
+
 static bool engine1543_control_write(NikonZ9State *s, unsigned i,
                                     hwaddr addr, uint64_t value)
 {
     unsigned j = i - 10, mode = value & 3;
-    bool video = engine1543_video_ready(s, j);
+    bool current_video = engine1543_video_ready(s, j);
+    bool retained_video = mode==1 && !current_video && engine1543_retained_video_start(s,j,value);
+    bool video = current_video || retained_video;
     bool rearm = mode == 3 && !video && s->engine1543_active[j] && capture_stream_can_rearm(s, j);
     if (value & ~0x103u ||
-        (mode == 1 && (!engine1543_ready(s, j) || s->engine1543_active[j])) ||
+        (mode == 1 && ((!engine1543_ready(s, j) && !retained_video) || s->engine1543_active[j])) ||
         (mode == 3 && s->engine1543_active[j] && !rearm)) {
         unknown_access(s, addr, value, 4, true);
         return true;
@@ -13439,6 +13483,8 @@ static bool engine1543_control_write(NikonZ9State *s, unsigned i,
         s->engine1543_active[j] = true;
         s->engine1543_held[j] = false;
         s->engine1543_starts[j]++;
+        if (current_video) { s->engine1543_video_program_known=true; }
+        if (retained_video) { s->engine1543_retained_starts++; }
         if (s->video_raw_transport_model && j==1 && video) { s->video_raw_ring_latched=false; }
         if (s->raw_pipeline_model && j == 0) {
             s->raw_pipeline_row = 0;
@@ -13494,8 +13540,11 @@ static char *get_engine1543_control_state(Object *obj, Error **errp)
         }
         g_string_append(out, "}}");
     }
-    g_string_append_printf(out, "],\"video_control_enabled\":%s,\"scope\":\"preview, finite photo and opt-in native383 video header control; no pixel or IRQ producer\"}",
-        s->engine1543_video_control_model ? "true" : "false");
+    g_string_append_printf(out, "],\"video_control_enabled\":%s,\"retained_start_enabled\":%s,"
+        "\"prior_video_program_known\":%s,\"retained_starts\":%" PRIu64
+        ",\"scope\":\"header control; optional previously accepted own-program START while adjacent configuration changes; data readiness unchanged, no pixels/IRQ\"}",
+        s->engine1543_video_control_model ? "true" : "false",s->engine1543_retained_start_model ? "true" : "false",
+        s->engine1543_video_program_known ? "true" : "false",s->engine1543_retained_starts);
     return g_string_free(out, false);
 }
 
@@ -20276,6 +20325,7 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "engine1543-control-state", get_engine1543_control_state, NULL);
     object_class_property_add_bool(oc, "engine1543-capture-control-model", get_engine1543_capture_control_model, set_engine1543_capture_control_model);
     object_class_property_add_bool(oc,"engine1543-video-control-model",get_engine1543_video_control_model,set_engine1543_video_control_model);
+    object_class_property_add_bool(oc,"engine1543-retained-start-model",get_engine1543_retained_start_model,set_engine1543_retained_start_model);
     object_class_property_add_bool(oc, "stream154c-stop-model", get_stream154c_stop_model, set_stream154c_stop_model);
     object_class_property_add_str(oc, "stream154c-state", get_stream154c_state, NULL);
     object_class_property_add_bool(oc, "engine1548-config-model", get_engine1548_config_model, set_engine1548_config_model);
