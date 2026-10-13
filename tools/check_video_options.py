@@ -11,6 +11,7 @@ OPTIONS = (
     'video-yuv-output-events-model', 'video-source-end-model',
     'video-secondary-isp-model', 'video-secondary-sensor-model',
     'video-secondary-source-end-model', 'video-receiver-before-supplier-model',
+    'video-primary-boundaries-model', 'engine151-active-program-model',
 )
 
 

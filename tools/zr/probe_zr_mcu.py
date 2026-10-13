@@ -1344,6 +1344,10 @@ def main():
                     help='functional source1 end after three actual secondary sensor/ISP transfers; original W1C ownership')
     ap.add_argument('--video-receiver-before-supplier',action='store_true',
                     help='complete video receiver may arm before A1 enable; actual output remains supplier-gated')
+    ap.add_argument('--video-primary-boundaries',action='store_true',
+                    help='inferred primary input/output image boundaries only after owned RAW and six actual Y/UV transfers')
+    ap.add_argument('--isp-active-program',action='store_true',
+                    help='admitted running ISP snapshot remains distinct from incomplete next START configuration')
     ap.add_argument('--video-peripheral-control',action='store_true',
                     help='default-off native peripheral command and1530 source/start/stop control')
     ap.add_argument('--engine152c-stream-receiver',action='store_true',
@@ -1530,6 +1534,10 @@ def main():
         ap.error('secondary source end requires declared owned secondary sensor input')
     if args.video_receiver_before_supplier and not args.engine151_video_stream:
         ap.error('video receiver ordering requires the declared video ISP stream')
+    if args.video_primary_boundaries and not (args.shared_z9_build and args.video_raw_transport and args.engine151_video_stream):
+        ap.error('video primary boundaries require shared actual internal RAW and video ISP')
+    if args.isp_active_program and not (args.shared_z9_build and args.video_secondary_isp):
+        ap.error('active ISP program requires the shared declared secondary video route')
     if args.video_peripheral_control and not (args.shared_z9_build and args.engine151_video_stream and args.engine153_config):
         ap.error('video peripheral control requires declared video ISP and original1530 config')
     if args.engine152c_stream_receiver and not (args.shared_z9_build and args.capture_raw_pipeline):
@@ -1814,6 +1822,10 @@ def main():
         props+=',video-secondary-source-end-model=on'
     if args.video_receiver_before_supplier:
         props+=',video-receiver-before-supplier-model=on'
+    if args.video_primary_boundaries:
+        props+=',video-primary-boundaries-model=on'
+    if args.isp_active_program:
+        props+=',engine151-active-program-model=on'
     if args.video_peripheral_control:
         props+=',video-peripheral-control-model=on'
     if args.engine152c_stream_receiver:

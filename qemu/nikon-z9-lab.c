@@ -432,6 +432,12 @@ struct NikonZ9State {
     uint64_t video_secondary_sensor_bytes, video_secondary_sensor_cancels;
     bool video_secondary_source_end_model;
     bool video_receiver_before_supplier_model;
+    bool video_primary_boundaries_model;
+    bool engine151_active_program_model;
+    uint64_t engine151_latched_parameter_valid[2];
+    uint32_t video_primary_boundaries_pending;
+    uint64_t video_primary_boundaries_frames, video_primary_input_acks;
+    uint64_t video_primary_output_acks, video_primary_boundaries_cancels;
     unsigned video_secondary_source_group;
     uint64_t video_secondary_source_ends, video_secondary_source_acks, video_secondary_source_cancels;
     unsigned video_source_group_transfers;
@@ -8842,7 +8848,7 @@ static void engine150c_stop_irq_update(NikonZ9State *s)
                  !!((s->engine150c_stop_pending & s->engine_150c_init[0x218 / 4]) |
                     ((s->statistics_pending | s->raw_primary_pending | s->raw_source_pending | s->primary_d980_pending | s->engine150c_direct_stop_pending1) & s->engine_150c_init[0x20c / 4]) |
                     ((s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
-                      s->engine150c_bit6_pending) &
+                      s->engine150c_bit6_pending | s->video_primary_boundaries_pending) &
                      s->engine_150c_init[0x200 / 4])));
     statistics_update(s);
     primary_empty_end_update(s);
@@ -9551,12 +9557,12 @@ static bool engine150c_stop_read(NikonZ9State *s, hwaddr addr,
         return true;
     case 0x150c0204:
         *value = (s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
-                  s->engine150c_bit6_pending) &
+                  s->engine150c_bit6_pending | s->video_primary_boundaries_pending) &
                  s->engine_150c_init[0x200 / 4];
         return true;
     case 0x150c0208:
         *value = s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
-                 s->engine150c_bit6_pending;
+                 s->engine150c_bit6_pending | s->video_primary_boundaries_pending;
         return true;
     case 0x150c0210: case 0x150c0214:
         *value = s->statistics_pending | s->raw_primary_pending | s->raw_source_pending | s->primary_d980_pending | s->engine150c_direct_stop_pending1;
@@ -10716,6 +10722,8 @@ static bool primary_bounded_reset_write(NikonZ9State *s, hwaddr addr,
         if (s->raw_pipeline_input_pair_model && (s->raw_primary_pending & 0x80000000)) {
             s->raw_pipeline_input_pair_cancelled++;
         }
+        s->video_primary_boundaries_cancels += !!s->video_primary_boundaries_pending;
+        s->video_primary_boundaries_pending = 0;
         s->raw_primary_pending = 0;
         primary_d980_single_cancel(s);
         s->primary_d980_cancelled += !!s->primary_d980_pending;
@@ -10994,7 +11002,8 @@ static bool engine150c_stop_write(NikonZ9State *s, hwaddr addr,
         uint32_t allowed = addr == 0x150c021c ? engine150c_stop_causes(allowed_engines) :
                            addr == 0x150c0204 ? (primary_direct_map(direct_engines, 0, false) | (s->primary_empty_end_model ? 0x108000 : 0) |
                                                 (s->engine150c_bit2_model ? 4 : 0) |
-                                                (s->engine150c_bit6_model ? 0x40 : 0)) :
+                                                (s->engine150c_bit6_model ? 0x40 : 0) |
+                                                (s->video_primary_boundaries_model ? 0x18 : 0)) :
                            (primary_direct_map(direct_engines, 1, false) | (s->statistics_model ? 0x20 : 0) |
                             (s->raw_pipeline_model ? 0x60000000 : 0) |
                             (s->raw_pipeline_input_pair_model ? 0x80000000 : 0) |
@@ -11039,6 +11048,10 @@ static bool engine150c_stop_write(NikonZ9State *s, hwaddr addr,
             s->engine150c_bit2_pending &= ~value;
             s->engine150c_bit6_acks += !!(s->engine150c_bit6_pending & value);
             s->engine150c_bit6_pending &= ~value;
+            uint32_t boundaries=s->video_primary_boundaries_pending & value;
+            s->video_primary_input_acks += !!(boundaries&8);
+            s->video_primary_output_acks += !!(boundaries&16);
+            s->video_primary_boundaries_pending &= ~value;
             uint32_t cleared = s->engine150c_direct_stop_pending & value;
             uint32_t engines = primary_direct_map(cleared, 0, true);
             s->engine150c_direct_stop_pending &= ~value;
@@ -12628,15 +12641,15 @@ static void set_engine151_control_model(Object *obj, bool value, Error **errp)
     s->engine151_control_model = value;
 }
 
-static bool engine151_control_ready(NikonZ9State *s, unsigned i)
+static bool engine151_program_ready(NikonZ9State *s, unsigned i,
+                                    const uint32_t *c, uint64_t parameter_valid)
 {
-    const uint32_t *c = s->engine151_config[i];
     /* A deliberately bounded admission rule for native226's parameter-RAM
      * path. It is not a hardware readiness register. Addresses are retained,
      * not consumed: parameter decoding and pixel processing remain separate. */
     if (s->engine151_hold[i] || s->engine151_reset_flags[i] != 3 ||
         !s->engine151_initializations[i] ||
-        s->engine151_parameter_valid[i] != ((UINT64_C(1) << 46) - 1) || c[0x1c / 4] != 0x3f ||
+        parameter_valid != ((UINT64_C(1) << 46) - 1) || c[0x1c / 4] != 0x3f ||
         c[0x260 / 4] != 0x1fff || c[0x264 / 4] != 0x3ff ||
         !(c[0x400 / 4] & 0x3fff) || !(c[0x400 / 4] >> 16) ||
         !(c[0x450 / 4] & 0x3fff) || !(c[0x450 / 4] >> 16)) {
@@ -12649,6 +12662,47 @@ static bool engine151_control_ready(NikonZ9State *s, unsigned i)
         }
     }
     return true;
+}
+
+static bool engine151_control_ready(NikonZ9State *s, unsigned i)
+{
+    return engine151_program_ready(s,i,s->engine151_config[i],s->engine151_parameter_valid[i]);
+}
+
+/* START earned a complete admitted snapshot. Preparing different shadow
+ * fields must not revoke it. Holds/reset/STOP still own cancellation; IRQ
+ * masks and W1C remain live. No partial next program is accepted as START. */
+static bool engine151_running_ready(NikonZ9State *s, unsigned i)
+{
+    if (!s->engine151_active[i]) { return false; }
+    if (!s->engine151_active_program_model) { return engine151_control_ready(s,i); }
+    return engine151_program_ready(s,i,s->engine151_latched[i],s->engine151_latched_parameter_valid[i]);
+}
+static bool get_engine151_active_program_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->engine151_active_program_model; }
+static void set_engine151_active_program_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"active ISP program selection immutable after realization");return;
+    }
+    s->engine151_active_program_model=value;
+}
+static char *get_engine151_active_program_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);GString *out=g_string_new(NULL);
+    g_string_append_printf(out,"{\"enabled\":%s,\"instances\":[",s->engine151_active_program_model?"true":"false");
+    for (unsigned i=0;i<2;i++) {
+        g_string_append_printf(out,"%s{\"active\":%s,\"running_ready\":%s,\"next_start_ready\":%s,"
+            "\"latched_parameter_valid\":%"PRIu64",\"shadow_enable\":%u,\"latched_enable\":%u,"
+            "\"shadow_input_mode\":%u,\"latched_input_mode\":%u}",
+            i?",":"",s->engine151_active[i]?"true":"false",engine151_running_ready(s,i)?"true":"false",
+            engine151_control_ready(s,i)?"true":"false",s->engine151_latched_parameter_valid[i],
+            s->engine151_config[i][0x1c/4],s->engine151_latched[i][0x1c/4],
+            s->engine151_config[i][0x218/4],s->engine151_latched[i][0x218/4]);
+    }
+    g_string_append(out,"],\"scope\":\"functional admitted active snapshot while next shadow configuration changes; START/hold/reset/STOP/live IRQ ownership remain checked; physical control staging and original algorithms unverified\"}");
+    return g_string_free(out,false);
 }
 
 static char *get_engine151_control_state(Object *obj, Error **errp)
@@ -12953,7 +13007,7 @@ static bool video_secondary_isp_ready(NikonZ9State *s)
     unsigned width=a[0x4c/4],height=a[0x50/4],pitch=a[0x38/4];
     return s->video_secondary_isp_model && s->engine151_video_stream_model &&
         s->video_raw_transport_model && s->engine151_active[1] &&
-        engine151_control_ready(s,1) && s->engine1543_active[1] && !s->engine1543_held[1] &&
+        engine151_running_ready(s,1) && s->engine1543_active[1] && !s->engine1543_held[1] &&
         width && height && width<=4096 && height<=2160 && !((width|height)&1) &&
         width*9==height*16 && pitch==((width*3+255)&~255u) && a[0x3c/4]==pitch &&
         c[0x200/4]==1 && c[0x204/4]==1 && !c[0x214/4] && c[0x218/4]==1 &&
@@ -13034,7 +13088,7 @@ static void set_video_secondary_sensor_model(Object *obj, bool value, Error **er
 static char *get_video_secondary_sensor_state(Object *obj, Error **errp)
 {
     NikonZ9State *s=NIKON_Z9_LAB(obj);
-    return g_strdup_printf("{\"enabled\":%s,\"route\":%s,\"ready\":%s,"
+    char *state=g_strdup_printf("{\"enabled\":%s,\"route\":%s,\"ready\":%s,"
         "\"epoch\":%"PRIu64",\"consumed\":%"PRIu64",\"sample_bytes\":%"PRIu64
         ",\"cancels\":%"PRIu64",\"samples_sha256\":\"%s\","
         "\"scope\":\"functional declared sensor clock/Bayer source to ISP1 after retired receiver/decoder; independent owned input, no original DSP/ISP or physical topology proof\"}",
@@ -13042,6 +13096,16 @@ static char *get_video_secondary_sensor_state(Object *obj, Error **errp)
         s->video_secondary_sensor_ready?"true":"false",s->video_secondary_sensor_epoch,
         s->video_secondary_sensor_consumed,s->video_secondary_sensor_bytes,s->video_secondary_sensor_cancels,
         s->video_secondary_sensor_sha256?s->video_secondary_sensor_sha256:"");
+
+    GString *out=g_string_new_len(state,strlen(state)-1);g_free(state);
+    g_string_append_printf(out,",\"gates\":{\"descriptor\":%s,\"clock\":%s,\"primary_reset\":%u,"
+        "\"primary_active\":%u,\"primary_hold\":%u,\"packet_owned\":%s,\"decoded_owned\":%s,"
+        "\"source_gate\":%u,\"isp_pending\":%u,\"source_pending\":%u,\"headers\":[%u,%u,%u]}}",
+        video_raw_descriptor(s)?"true":"false",s->event_timing_active?"true":"false",s->primary_reset_stage,
+        s->engine150c_active,s->engine_150c_init[0x18/4],s->video_raw_packet_owned?"true":"false",
+        s->video_raw_frame_ready?"true":"false",s->engine1518[2].config[0x30/4],s->engine151_pending[1],
+        s->engine1518[2].pending,s->engine1542_pending[1],s->engine1542_pending[10],s->engine1542_pending[11]);
+    return g_string_free(out,false);
 }
 
 static bool get_video_secondary_source_end_model(Object *obj, Error **errp)
@@ -13063,6 +13127,32 @@ static char *get_video_secondary_source_end_state(Object *obj, Error **errp)
         s->video_secondary_source_end_model?"true":"false",s->video_secondary_source_group,
         s->video_secondary_source_ends,s->video_secondary_source_acks,s->video_secondary_source_cancels,
         s->engine1518[2].pending&0x20000000);
+}
+
+/* Original primary group0 status bits3/4 become source events2/3.
+ * This functional combined path posts both only after an independently owned
+ * internal RAW input and all six submitted Y/UV RAM transfers have completed.
+ * Native ISR/W1C owns notification and retirement. Physical staging/timing
+ * and original arithmetic remain unverified; no software flag is written. */
+static bool get_video_primary_boundaries_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_primary_boundaries_model; }
+static void set_video_primary_boundaries_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"video primary boundaries immutable after realization");return;
+    }
+    s->video_primary_boundaries_model=value;
+}
+static char *get_video_primary_boundaries_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"enabled\":%s,\"pending\":%u,\"mask\":%u,"
+        "\"frames\":%"PRIu64",\"input_acks\":%"PRIu64",\"output_acks\":%"PRIu64
+        ",\"cancels\":%"PRIu64",\"scope\":\"functional combined primary group0 image boundaries after owned internal RAW and six actual Y/UV transfers; native ISR/W1C only; physical staging and original algorithms unverified\"}",
+        s->video_primary_boundaries_model?"true":"false",s->video_primary_boundaries_pending,
+        s->engine_150c_init[0x200/4],s->video_primary_boundaries_frames,
+        s->video_primary_input_acks,s->video_primary_output_acks,s->video_primary_boundaries_cancels);
 }
 
 static bool get_video_receiver_before_supplier_model(Object *obj, Error **errp)
@@ -13167,6 +13257,7 @@ static bool engine151_write(NikonZ9State *s, hwaddr addr, uint64_t value,
             goto invalid;
         }
         memcpy(s->engine151_latched[i], s->engine151_config[i], sizeof(s->engine151_latched[i]));
+        s->engine151_latched_parameter_valid[i]=s->engine151_parameter_valid[i];
         s->engine151_active[i] = true;
         s->engine151_starts[i]++;
         if (s->engine151_capture_pixels_model && i == 0 && !video) {
@@ -20526,6 +20617,10 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc,"video-secondary-sensor-state",get_video_secondary_sensor_state,NULL);
     object_class_property_add_bool(oc,"video-secondary-source-end-model",get_video_secondary_source_end_model,set_video_secondary_source_end_model);
     object_class_property_add_bool(oc,"video-receiver-before-supplier-model",get_video_receiver_before_supplier_model,set_video_receiver_before_supplier_model);
+    object_class_property_add_bool(oc,"video-primary-boundaries-model",get_video_primary_boundaries_model,set_video_primary_boundaries_model);
+    object_class_property_add_str(oc,"video-primary-boundaries-state",get_video_primary_boundaries_state,NULL);
+    object_class_property_add_bool(oc,"engine151-active-program-model",get_engine151_active_program_model,set_engine151_active_program_model);
+    object_class_property_add_str(oc,"engine151-active-program-state",get_engine151_active_program_state,NULL);
     object_class_property_add_str(oc,"video-secondary-source-end-state",get_video_secondary_source_end_state,NULL);
     object_class_property_add_str(oc,"video-source-end-state",get_video_source_end_state,NULL);
     object_class_property_add_str(oc,"video-yuv-output-state",get_video_yuv_output_state,NULL);

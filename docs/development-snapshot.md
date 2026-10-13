@@ -1,4 +1,8 @@
-# Current: shared144
+# Current: shared146
+
+See [shared146](shared146.md) / [中文](shared146.zh-CN.md) for current source changes, validation and native recording failures. Older sections retain their historical build scopes.
+
+# Historical: shared144
 
 See [shared144](shared144.md) for the current source delta, native failures, independent package checks and reuse limits. The sections below retain their historical build scopes.
 

@@ -43,7 +43,7 @@ class RecordingPacing:
             return
         import json
         value=dict(stage=stage,phase=phase,read_only=True)
-        for property in ('raw-pipeline-state','video-raw-transport-state','video-yuv-output-state','video-source-end-state','video-secondary-isp-state','video-secondary-sensor-state','video-secondary-source-end-state',
+        for property in ('raw-pipeline-state','video-raw-transport-state','video-yuv-output-state','video-source-end-state','video-secondary-isp-state','video-secondary-sensor-state','video-secondary-source-end-state','video-primary-boundaries-state','engine151-active-program-state',
                          'engine1543-control-state','engine151-control-state','engine1518-state',
                          'engine152c-stream-receiver-state','engine1530-config-state','event1508-channel-state','engine150c-state'):
             try:

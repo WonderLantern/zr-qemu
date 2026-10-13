@@ -1,0 +1,124 @@
+{
+  "firmware_sha256": "9ac53c082e1d7cc841c458465c08bb49223b36cf9d381b8206076751d7b42c8f",
+  "points": {
+    "app_video_started_callback": "0x40f72f2c",
+    "app_state_change": "0x40f6a5d0",
+    "native_video_start_enter": "0x411a1ce0",
+    "native_video_stop_enter": "0x411a1e70",
+    "native_video_start_failure_cleanup": "0x411a9cd8",
+    "native_video_core_dispatch": "0x4116e9f8",
+    "native_video_stop_finish": "0x411b0f40",
+    "native_video_w5_header_result": "0x40e59c1c",
+    "native_source_stream0_consumer": "0x4107af08",
+    "native_source_stream1_consumer": "0x4107ae48",
+    "video_input_queue_pump": "0x40f1a954",
+    "video_input_queue_count_return": "0x40f1a9dc",
+    "video_input_frame_pull_return": "0x40f1a9f4",
+    "video_framework_queue_put_call": "0x40f1aa84",
+    "video_framework_queue_put": "0x403009a0",
+    "video_framework_picture_pump": "0x40300ac8",
+    "video_framework_source_register": "0x40301520",
+    "video_framework_encode_request": "0x40300c84",
+    "encoder_request_adapter": "0x40e33af4",
+    "encoder_request_signal": "0x40e38b9c",
+    "encoder_request_signal_post": "0x40e38c7c",
+    "encoder_worker_dispatch": "0x40e3abb0",
+    "encoder_worker_picture_call": "0x40e3b57c",
+    "encoder_picture_driver": "0x40e593d4",
+    "encoder_picture_command": "0x40e59864",
+    "encoder_command_submit": "0x40e53d24",
+    "source0_data_wait": "0x41086c18",
+    "source0_data_wait_return": "0x41086c1c",
+    "video_input_event_worker": "0x40f18cd4",
+    "video_frame_packet_enter": "0x40f1a490",
+    "video_frame_packet_put": "0x40f1a5b8",
+    "video_frame_packet_put_return": "0x40f1a5bc",
+    "video_frame_packet_source_call": "0x4108a0a4",
+    "video_frame_packet_process_call": "0x4109e8cc",
+    "video_frame_packet_raw_call": "0x410a27d8",
+    "video_input_frame_provider_enter": "0x40f1a68c",
+    "video_input_configuration_enter": "0x40f1a2a8",
+    "video_raw_frame_source_call": "0x4108a0c8",
+    "video_raw_frame_finish_call": "0x4108b010",
+    "video_raw_frame_bridge": "0x40f324ac",
+    "source_movie_actor_enter": "0x4108a014",
+    "source_movie_enabled_check": "0x4108a048",
+    "source_movie_suppress_check": "0x4108a058",
+    "source_movie_format_check": "0x4108a084",
+    "process_movie_actor_enter": "0x4109e880",
+    "process_movie_feature_check": "0x4109e898",
+    "raw_movie_actor_enter": "0x410a2790",
+    "raw_movie_feature_check": "0x410a27a8",
+    "source_pipeline_enter": "0x410867d8",
+    "source_pipeline_feature_check": "0x41086844",
+    "source_pipeline_parameter_check": "0x41086854",
+    "source_pipeline_data_wait": "0x4108688c",
+    "source_pipeline_data_return": "0x41086890",
+    "source_pipeline_process_call": "0x41086918",
+    "source_pipeline_data_signal": "0x4107ab20",
+    "primary_image_status_callback": "0x40e1ff64",
+    "primary_image_input_event": "0x412aa2d4",
+    "primary_image_output_event": "0x412aa324",
+    "source_image_event_consumer": "0x4107aa00",
+    "source_prepare_data_wait": "0x41085f18",
+    "source_prepare_data_return": "0x41085f1c",
+    "main_source_buffer_wait": "0x4108465c",
+    "main_source_buffer_return": "0x41084660",
+    "main_source_buffer_reuse": "0x41084678"
+  },
+  "memory": {
+    "app_shoot_actor": {
+      "address": "0xa02830858",
+      "bytes": 640
+    },
+    "video_framework_state": {
+      "address": "0xa03068460",
+      "bytes": 4096
+    },
+    "video_input_queue_state": {
+      "address": "0xa033c25cc",
+      "bytes": 512
+    },
+    "native_x0_argument": {
+      "register": 0,
+      "bytes": 64
+    },
+    "source1_worker_parameters": {
+      "register": 22,
+      "bytes": 2816
+    },
+    "source_wait_stack": {
+      "register": 31,
+      "bytes": 64
+    },
+    "source_pipeline_worker_parameters": {
+      "register": 23,
+      "bytes": 2816
+    },
+    "native_branch_pointer": {
+      "register": 8,
+      "bytes": 1024
+    }
+  },
+  "scope": "Read-only main/secondary source waits and original frame/queue/encoder paths. Main wait derives a bit modulo31 from actor index and waits on a03ded6a4, distinct from image flags a03ded680; buffer role remains separately verified. Active ISP uses its fully admitted snapshot while next configuration is assembled; new START remains strict, masks/ACK/STOP remain native-owned. Functional processing, physical staging and original algorithms unaccepted. Full two factory shutter START/STOP/card/full decode/LV/menu gates unchanged.",
+  "provenance": {
+    "zr-video-native-core-bindings.json": "d89bef004ee054d05e752267dc47c7b17fa8521bd9505a817ddbb450dd3d284c",
+    "zr-video-native-frame-admission-bindings.json": "5ac47d41e5ae7a509bfe800736b174d2cac0f7ba1abb3742720b0f0da10e35c1",
+    "zr-video-native-movie-delivery-v2-bindings.json": "392aeeb85ecb8ababc0af525b5d80a68b0c8c733336c87005656a8c58ba61873",
+    "zr-video-native-movie-worker-bindings.json": "80bb067a8933323654fd59fcd8cb0e006c46f8c8229d52092466b3738d8af731",
+    "zr-video-native-source-flow-bindings.json": "611f29d246d4a2b1da83f7ecb41565e45a2ac816cf7e61116c26ea4cb20de6ea",
+    "zr-video-native-image-delivery-bindings.json": "376e558ba665669abbb83f449060fedfe4d121b137861fb58cf8fc71662729fb",
+    "zr-video-native-battery-query-bindings.json": "1a9df7f0e33da3643016c328daba3723c40a3f024917ce895969b7413d831896",
+    "zr-video-native-image-client-bindings.json": "dd0db4576108b0e10053e2840cccd24c571d4686aba22ff21ab03a7cf31e4acb",
+    "zr-video-native-image-routing-bindings.json": "a96e69979c308b58a5506d5927e04e07cdbebbac349a7730964d65bae4abc515",
+    "zr-video-native-encoder-requests-bindings.json": "0ac4e184fb3821b3f5505d9fd5d679be19bf9e691ed42b7973dd9c32c361df33",
+    "zr-video-native-secondary-isp-bindings.json": "9a9f6390b6bebc6ff932ae6089baf06d4eb0aabeb3327e19e5c71e64207c1c18",
+    "zr-video-native-sensor-input-bindings.json": "4f09b4640070aca0eb1ef5fa32304d59b613d9400b63c88b432403c584a27335",
+    "zr-video-native-secondary-end-bindings.json": "a5017a0f4381e39605bbd673ebd3cf05cc264e48db48a80e077c59f38ef6c932",
+    "zr-video-native-receiver-order-bindings.json": "d574991b29a8cfe13da808a9acf1568e9bb7bf296ab0d93a8b279e7031cbf36a",
+    "zr-video-native-frame-conditions-bindings.json": "44c8ea04391638234839c188bbd60b0424e1b5484fe78018fd3a351debed9452",
+    "zr-video-native-primary-boundary-bindings.json": "3becd14e60826786543fa83fa54f38cbcd92cdb72628aa13ae0c06b84eb0d761"
+  },
+  "maximum_records": 32768,
+  "skip_x0": {}
+}

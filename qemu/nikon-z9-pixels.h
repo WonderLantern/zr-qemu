@@ -99,6 +99,7 @@ static void raw_pipeline_tick(void *opaque)
     bool internal = video && s->video_raw_transport_model;
     bool sensor_secondary=secondary_video && video_secondary_sensor_route(s);
     bool yuv_events=internal && s->video_yuv_output_events_model;
+    if (internal && s->video_primary_boundaries_model && s->video_primary_boundaries_pending) { return; }
     const NikonRawPixels *pixel_source = sensor_secondary ? s->video_secondary_sensor_pixels :
         internal ? s->video_raw_pixels : s->raw_pixels;
     if (internal) {
@@ -309,6 +310,11 @@ static void raw_pipeline_tick(void *opaque)
     if (s->raw_pipeline_input_pair_model) {
         s->raw_primary_pending |= 0x80000000;
         s->raw_pipeline_input_pair_completions++;
+        engine150c_stop_irq_update(s);
+    }
+    if (internal && s->video_primary_boundaries_model) {
+        s->video_primary_boundaries_pending |= 0x18;
+        s->video_primary_boundaries_frames++;
         engine150c_stop_irq_update(s);
     }
     if (sensor_secondary) {
