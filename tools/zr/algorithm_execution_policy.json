@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "effective_date": "2026-10-12",
+  "require_original_algorithms": true,
+  "required_algorithms": [
+    "isp",
+    "dsp",
+    "h265",
+    "raw_compression",
+    "jpeg"
+  ],
+  "user_requirement": "ISP/DSP/H265/RAW压缩/JPEG需要使用原机算法",
+  "acceptance": "Original software or microcode must actually execute, or the original hardware arithmetic must be reconstructed and independently verified. Original command submission, valid file formats and host replacement encoders do not satisfy this requirement.",
+  "diagnostic_backends": [
+    "simplified-rggb-isp",
+    "x265",
+    "WLVR-zlib",
+    "libjpeg-turbo"
+  ],
+  "supporting_materials": {
+    "xm6": {
+      "available": true,
+      "factory_version": "1.1.0.F",
+      "firmware_version_equivalence_verified": false
+    },
+    "neupro": {
+      "detailed_programming_and_arithmetic_documents_available": false,
+      "public_product_notes_are_not_complete_specifications": true
+    },
+    "local_neural_reproduction": {
+      "status": "inconclusive",
+      "original_inference_accepted": false
+    }
+  },
+  "publication": "Publish authored emulator code and public dependencies only. Users supply firmware, vendor executable images and private reference media locally.",
+  "delivery_sequence": [
+    "complete-zr-functional-recording-and-publish",
+    "implement-and-verify-original-dsp-isp-and-other-algorithms"
+  ],
+  "current_milestone": {
+    "name": "zr-functional-recording-before-original-algorithms",
+    "user_instruction": "先把ZR录制做完上传Github再做真实DSP/ISP等",
+    "functional_backends_allowed": true,
+    "original_algorithm_suite_required_for_this_milestone": false,
+    "publication_requires": "Actual native REC start/stop, camera-written playable files, independent decode, fresh live-view/menu recovery and proprietary-input audit. Preserve explicit backend and original-algorithm limitations.",
+    "publication_formats_required": [
+      "h265-10bit",
+      "r3d-ne"
+    ],
+    "partial_format_publication_allowed": false,
+    "user_release_confirmation": "H.265 与 R3D 都通过后再发布"
+  },
+  "development_snapshot_publication_authorized": "2026-10-13: latest Z9 and ZR source snapshots requested before qualified recording release"
+}

@@ -1,0 +1,4 @@
+* text=auto eol=lf
+COPYING text eol=lf
+# Unified-diff blank context lines require a single space.
+*.patch -whitespace

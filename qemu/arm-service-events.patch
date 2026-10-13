@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Optional functional service-core events. Original QEMU notices remain intact.
+# No firmware bytes. See docs/service-events.md for scope and limitations.
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -759,6 +759,12 @@
+     /* Optional fault info across tlb lookup. */
+     ARMMMUFaultInfo *tlb_fi;
+ 
++    /* Optional service-core event state; reset with the CPU. */
++    bool wl_event_pending;
++    bool wl_event_waiting;
++    uint64_t wl_event_sleeps;
++    uint64_t wl_event_wakes;
++
+     /* Fields up to this point are cleared by a CPU reset */
+     struct {} end_reset_fields;
+ 
+@@ -915,6 +921,8 @@
+     CPUState parent_obj;
+ 
+     CPUARMState env;
++    bool wl_event_peer;
++    bool wl_event_block;
+ 
+     /* Coprocessor information */
+     GHashTable *cp_regs;
+--- a/target/arm/tcg/helper.h
++++ b/target/arm/tcg/helper.h
+@@ -55,6 +55,7 @@
+ DEF_HELPER_1(setend, void, env)
+ DEF_HELPER_2(wfi, void, env, i32)
+ DEF_HELPER_1(wfe, void, env)
++DEF_HELPER_2(wl_sev, void, env, i32)
+ DEF_HELPER_2(wfit, void, env, i64)
+ DEF_HELPER_1(yield, void, env)
+ DEF_HELPER_1(pre_hvc, void, env)
+--- a/target/arm/tcg/a64.decode
++++ b/target/arm/tcg/a64.decode
+@@ -237,9 +237,8 @@
+     YIELD       1101 0101 0000 0011 0010 0000 001 11111
+     WFE         1101 0101 0000 0011 0010 0000 010 11111
+     WFI         1101 0101 0000 0011 0010 0000 011 11111
+-    # We implement WFE to never block, so our SEV/SEVL are NOPs
+-    # SEV       1101 0101 0000 0011 0010 0000 100 11111
+-    # SEVL      1101 0101 0000 0011 0010 0000 101 11111
++    SEV         1101 0101 0000 0011 0010 0000 100 11111
++    SEVL        1101 0101 0000 0011 0010 0000 101 11111
+     # Our DGL is a NOP because we don't merge memory accesses anyway.
+     # DGL       1101 0101 0000 0011 0010 0000 110 11111
+     XPACLRI     1101 0101 0000 0011 0010 0000 111 11111
+--- a/target/arm/tcg/translate-a64.c
++++ b/target/arm/tcg/translate-a64.c
+@@ -2020,6 +2020,18 @@
+     if (!(tb_cflags(s->base.tb) & CF_PARALLEL)) {
+         s->base.is_jmp = DISAS_YIELD;
+     }
++    return true;
++}
++
++static bool trans_SEV(DisasContext *s, arg_SEV *a)
++{
++    gen_helper_wl_sev(tcg_env, tcg_constant_i32(0));
++    return true;
++}
++
++static bool trans_SEVL(DisasContext *s, arg_SEVL *a)
++{
++    gen_helper_wl_sev(tcg_env, tcg_constant_i32(1));
+     return true;
+ }
+ 
+--- a/target/arm/tcg/op_helper.c
++++ b/target/arm/tcg/op_helper.c
+@@ -370,6 +370,7 @@
+ 
+ void HELPER(wfi)(CPUARMState *env, uint32_t insn_len)
+ {
++    env->wl_event_waiting = false;
+ #ifdef CONFIG_USER_ONLY
+     /*
+      * WFI in the user-mode emulator is technically permitted but not
+@@ -469,8 +470,64 @@
+ #endif
+ }
+ 
++void HELPER(wl_sev)(CPUARMState *env, uint32_t local)
++{
++#ifndef CONFIG_USER_ONLY
++    CPUState *source = env_cpu(env), *target;
++    bool take_lock = !bql_locked();
++    if (take_lock) {
++        bql_lock();
++    }
++    CPU_FOREACH(target) {
++        ARMCPU *cpu = ARM_CPU(target);
++        if (!cpu->wl_event_peer || (local && source != target)) {
++            continue;
++        }
++        if (cpu->env.wl_event_waiting) {
++            /* This event completes the outstanding WFE. EXITTB wakes the
++             * halted CPU without inventing an architectural interrupt. */
++            cpu->env.wl_event_waiting = false;
++            cpu->env.wl_event_pending = false;
++            cpu->env.wl_event_wakes++;
++            cpu_interrupt(target, CPU_INTERRUPT_EXITTB);
++        } else {
++            cpu->env.wl_event_pending = true;
++        }
++    }
++    if (take_lock) {
++        bql_unlock();
++    }
++#endif
++}
++
+ void HELPER(wfe)(CPUARMState *env)
+ {
++#ifndef CONFIG_USER_ONLY
++    ARMCPU *cpu = env_archcpu(env);
++    if (cpu->wl_event_block && env->aarch64) {
++        CPUState *cs = env_cpu(env);
++        uint32_t excp;
++        int target_el;
++        env->wl_event_waiting = false;
++        if (env->wl_event_pending) {
++            env->wl_event_pending = false;
++            return;
++        }
++        if (cpu_has_work(cs)) {
++            return;
++        }
++        target_el = check_wfx_trap(env, true, &excp);
++        if (target_el) {
++            env->pc -= 4;
++            raise_exception(env, excp, syn_wfx(1, 0xe, 1, false), target_el);
++        }
++        env->wl_event_waiting = true;
++        env->wl_event_sleeps++;
++        cs->exception_index = EXCP_HLT;
++        cs->halted = 1;
++        cpu_loop_exit(cs);
++    }
++#endif
+     /* This is a hint instruction that is semantically different
+      * from YIELD even though we currently implement it identically.
+      * Don't actually halt the CPU, just yield back to top

@@ -1,0 +1,32 @@
+name: Source-only checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  synthetic-and-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build patch pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev libfdt-dev libjpeg-dev libx265-dev libx264-dev exfatprogs
+          python -m pip install -r requirements.txt
+      - name: Reviewed source and history
+        run: python tools/audit_publication.py
+      - name: Synthetic contracts
+        run: sh tests/run.sh
+      - name: Build pinned QEMU overlay
+        run: python tools/build.py --jobs 2
+      - name: Firmware-free realization
+        run: python tools/smoke_qemu.py .build/build/qemu-system-aarch64
+      - name: Authored service-core event program
+        run: python tools/check_service_events.py --qemu .build/build/qemu-system-aarch64 --output .local/service-events-ci

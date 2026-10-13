@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Z9 research emulator</title>
+<style>body{margin:16px;background:#111;color:#eee;font:14px monospace}button{border:1px solid #888;border-radius:0;background:#222;color:#eee;padding:8px;margin-right:8px}img{display:block;width:min(1024px,100%);height:auto;margin:12px 0}pre{white-space:pre-wrap}</style>
+<button onclick="key('menu')">MENU</button><button onclick="key('half-down')">Half shutter hold</button><button onclick="key('half-up')">Release</button>
+<img id="frame" alt="Waiting for original camera LCD"><pre id="status">Starting</pre>
+<script>
+async function key(k){await fetch('/key/'+k,{method:'POST'})}
+async function update(){try{const s=await(await fetch('/status')).json();document.getElementById('status').textContent=JSON.stringify(s,null,2);const b=await(await fetch('/frame')).blob();if(b.size){const img=document.getElementById('frame'),old=img.src;img.src=URL.createObjectURL(b);if(old.startsWith('blob:'))URL.revokeObjectURL(old)}}catch(e){document.getElementById('status').textContent=String(e)}setTimeout(update,500)}update();
+</script>

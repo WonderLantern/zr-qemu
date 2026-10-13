@@ -1,0 +1,108 @@
+{
+  "firmware_sha256": "9ac53c082e1d7cc841c458465c08bb49223b36cf9d381b8206076751d7b42c8f",
+  "points": {
+    "app_shutter_video_event": "0x40f72a38",
+    "app_video_request_enter": "0x40f72c9c",
+    "app_video_started_callback": "0x40f72f2c",
+    "app_video_started_success": "0x40f72f54",
+    "app_video_stop_native_return": "0x40f734e0",
+    "app_video_stopped_callback": "0x40f72f80",
+    "app_video_request_state_write": "0x40f7333c",
+    "app_state_change": "0x40f6a5d0",
+    "native_video_start_enter": "0x411a1ce0",
+    "native_video_started_callback": "0x411a1d7c",
+    "native_video_stop_enter": "0x411a1e70",
+    "native_video_stopped_callback": "0x411a1eec",
+    "stream_receiver_start_notice": "0x40ec998c",
+    "stream_receiver_supply_callback": "0x40ec9ea8",
+    "native_video_start_failure_cleanup": "0x411a9cd8",
+    "native_video_core_start_guard": "0x41165c00",
+    "native_video_core_start_worker": "0x41165c58",
+    "native_video_core_stop_enqueue": "0x41165d40",
+    "native_video_core_stop_worker": "0x41165d78",
+    "native_video_core_stop_forwarded": "0x41165e24",
+    "native_video_core_dispatch": "0x4116e9f8",
+    "native_video_core_start_branch": "0x4116eb14",
+    "native_video_core_start_build_return": "0x4116eda0",
+    "native_video_core_stop_branch": "0x4116ea40",
+    "native_video_controller_event": "0x411984e4",
+    "native_video_stop_phase_return": "0x411a1f24",
+    "native_video_stop_core_enqueue_return": "0x411a1f74",
+    "native_video_stop_finish": "0x411b0f40",
+    "native_video_sequence_close_enter": "0x4116aec8",
+    "native_video_receiver_prepare": "0x40ec9ee4",
+    "native_video_w5_header_result": "0x40e59c1c",
+    "front_frame_message9_enter": "0x4115a230",
+    "native_source_stream_isr": "0x40e0ae38",
+    "native_primary_forced_stop_enter": "0x40e202d8",
+    "native_primary_forced_stop_return": "0x40eba154",
+    "native_movie_gate_enter": "0x41184094",
+    "native_movie_source_trigger": "0x410ac344",
+    "native_movie_source_gate": "0x410ac520",
+    "native_movie_submit_enter": "0x411844a8",
+    "native_movie_submit_guard": "0x411844d8",
+    "native_movie_submit_source_prepare": "0x4118458c",
+    "native_movie_submit_return": "0x41184634",
+    "native_movie_queue_primary_call": "0x411845b8",
+    "native_movie_queue_secondary_call": "0x41184604",
+    "native_source_stream_callback": "0x40e9c83c",
+    "native_source_stream0_consumer": "0x4107af08",
+    "native_source_stream1_consumer": "0x4107ae48",
+    "native_source_trigger_consume": "0x410ab608",
+    "native_source_forward_trigger": "0x40ed1690",
+    "native_source_forward_consume": "0x40ed103c",
+    "native_source_forward_vcall": "0x40ed1040",
+    "native_source_forward_return": "0x40ed1044",
+    "native_movie_source_work": "0x41185c00",
+    "native_movie_source_get_call": "0x41185c2c",
+    "native_movie_source_get_return": "0x41185c30",
+    "native_movie_slot_get_call": "0x41185c3c",
+    "native_movie_slot_get_return": "0x41185c40",
+    "native_movie_source_guard": "0x41185cfc",
+    "native_movie_source_data_branch": "0x41185d24",
+    "native_movie_source_alternate_branch": "0x41185e9c",
+    "native_movie_source_capacity": "0x41185e40",
+    "native_movie_source_callback": "0x41186854"
+  },
+  "memory": {
+    "app_shoot_actor": {
+      "address": "0xa02830858",
+      "bytes": 640
+    },
+    "native_core_payload": {
+      "register": 0,
+      "bytes": 112
+    },
+    "native_configuration_control": {
+      "address": "0xa03e37fc0",
+      "bytes": 4096
+    },
+    "native_source_stream_contexts": {
+      "address": "0xa02808598",
+      "bytes": 144
+    },
+    "native_movie_source_task": {
+      "address": "0xa03dff7c0",
+      "bytes": 2048
+    },
+    "native_movie_encoder_task": {
+      "address": "0xa03e3c800",
+      "bytes": 2048
+    },
+    "native_movie_stack": {
+      "register": 31,
+      "bytes": 512
+    },
+    "native_forward_task_context": {
+      "address": "0xa030f8bd8",
+      "bytes": 384
+    }
+  },
+  "scope": "Read-only whole VIDEO main-shutter lifecycle, source-trigger consumption/forwarding and actual indirect target, movie source/slot acquisition returns, bounded original stack descriptors and task RAM. Observe original prefix-free idle teardown; never set guest flags/queue nodes or complete unsubmitted processing. Removed MVD hooks do not imply zero MVD activity.",
+  "provenance": {
+    "zr-video-native-core-bindings.json": "d89bef004ee054d05e752267dc47c7b17fa8521bd9505a817ddbb450dd3d284c",
+    "zr-video-native-frame-admission-bindings.json": "5ac47d41e5ae7a509bfe800736b174d2cac0f7ba1abb3742720b0f0da10e35c1",
+    "zr-video-native-movie-delivery-v2-bindings.json": "392aeeb85ecb8ababc0af525b5d80a68b0c8c733336c87005656a8c58ba61873",
+    "zr-video-native-movie-worker-bindings.json": "80bb067a8933323654fd59fcd8cb0e006c46f8c8229d52092466b3738d8af731"
+  }
+}
