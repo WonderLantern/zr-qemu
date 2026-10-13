@@ -29,7 +29,7 @@ def main():
     manifest=json.loads((ROOT/'.local/build-manifest.json').read_text())
     work=Path(manifest['binary']).resolve().parents[1]
     names=dict(preview='zr-native-preview.json',photo='zr-native-lossless14-repeated-raw-whole.json',
-        main10='zr-native-functional-main10-retained-header-recording.json',r3d='zr-native-functional-r3d-retained-header-recording.json')
+        main10='zr-native-functional-main10-receiver-order-recording.json',r3d='zr-native-functional-r3d-receiver-order-recording.json')
     profile=ROOT/'tools/zr/profiles'/names[a.profile]
     options=dict(json.loads(profile.read_text())['arguments'],name='zr-'+output.name,
         raw_input=str(raw))

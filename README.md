@@ -3,7 +3,7 @@
 [中文](README.zh-CN.md) · [Latest scope](docs/development-snapshot.md) · [Local inputs](docs/zr-inputs.md) · [Build](docs/build.md)
 
 Experimental, source-only **Nikon ZR C1.11** emulator on QEMU10.2.4, reusing
-the [WonderLantern Z9](https://github.com/WonderLantern/z9-qemu) shared138
+the [WonderLantern Z9](https://github.com/WonderLantern/z9-qemu) shared144
 EXPEED7 board. Independent research and learning; no Nikon firmware, private
 code, ROM resources, fonts, calibration, SDKs or media are distributed.
 Users provide their own compatible inputs locally. See NOTICE.md.
@@ -69,4 +69,4 @@ The source is GPL-2.0-or-later with retained upstream notices. Z7 is frozen.
 Original ISP/DSP/H.265/RAW/JPEG, real lens/AF/PDAF, pre-capture/burst stability,
 physical timing, full NeuPro specification and neural inference remain open.
 
-最新共享设备更新、状态查询契约与证据更正见 [shared138 notes](docs/shared138.md)。完整 H.265／R3D 录像与原机算法仍未验收。
+当前 shared144 的共享输入/所有权模型、整轮录像失败结果及复用更正见 [shared144 notes](docs/shared144.md)。H.265／R3D 录像和原机算法仍未验收。

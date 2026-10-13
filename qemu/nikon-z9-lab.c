@@ -421,6 +421,22 @@ struct NikonZ9State {
     uint32_t engine1542_pending[40];
     uint64_t engine1542_acks[40];
     bool raw_pipeline_model;
+    bool video_yuv_output_events_model;
+    bool video_source_end_model;
+    bool video_secondary_isp_model;
+    uint64_t video_secondary_isp_frames;
+    bool video_secondary_sensor_model, video_secondary_sensor_ready;
+    NikonRawPixels *video_secondary_sensor_pixels;
+    char *video_secondary_sensor_sha256;
+    uint64_t video_secondary_sensor_epoch, video_secondary_sensor_consumed;
+    uint64_t video_secondary_sensor_bytes, video_secondary_sensor_cancels;
+    bool video_secondary_source_end_model;
+    bool video_receiver_before_supplier_model;
+    unsigned video_secondary_source_group;
+    uint64_t video_secondary_source_ends, video_secondary_source_acks, video_secondary_source_cancels;
+    unsigned video_source_group_transfers;
+    uint64_t video_source_group_ends, video_source_group_acks, video_source_group_cancels;
+    uint64_t video_yuv_output_frames, video_yuv_output_refills, video_yuv_output_banks, video_yuv_output_waits;
     bool raw_pipeline_1514_completion_model;
     bool raw_pipeline_151c_completion_model;
     bool raw_pipeline_input_pair_model;
@@ -12155,6 +12171,12 @@ static bool engine1518_write(NikonZ9State *s, hwaddr addr, uint64_t value,
             e->drain_acks++;
         }
         uint32_t completed = e->pending & 0x08100000;
+        if (i==2 && s->video_secondary_source_end_model && (e->pending&value&0x20000000)) {
+            s->video_secondary_source_acks++;s->video_secondary_source_group=0;
+        }
+        if (i==0 && s->video_source_end_model && (e->pending&value&0x20000000)) {
+            s->video_source_group_acks++;s->video_source_group_transfers=0;
+        }
         e->pending &= ~value;
         if (s->raw_pipeline_151c_completion_model &&
             (i == 2 || (i == 0 && s->engine151_video_stream_model)) && completed &&
@@ -12170,6 +12192,14 @@ static bool engine1518_write(NikonZ9State *s, hwaddr addr, uint64_t value,
             if (s->raw_pipeline_151c_completion_model && i == 2 &&
                 (e->pending & 0x08100000)) {
                 e->stream_cancelled++;
+            }
+            if (i==0 && s->video_source_end_model) {
+                if (e->pending&0x20000000 || s->video_source_group_transfers) { s->video_source_group_cancels++; }
+                s->video_source_group_transfers=0;
+            }
+            if (i==2 && s->video_secondary_source_end_model) {
+                if (e->pending&0x20000000 || s->video_secondary_source_group) { s->video_secondary_source_cancels++; }
+                s->video_secondary_source_group=0;
             }
             e->pending = 0;
             e->config[0x30 / 4] = 0;
@@ -12911,6 +12941,201 @@ static bool engine151_video_ready(NikonZ9State *s, unsigned i)
         src[0xc4/4] == 0x22 && src[0xd4/4] == 0x22;
 }
 
+/* Original ZR524 switches to ISP1 with the internal RGB port,
+ * source2 and retained C1 supplier. It is not the PHOTO external-RAW path.
+ * Require the complete submitted geometry and source modes, then let the
+ * ordinary raw pipeline enforce decoder, output spans and IRQ ownership. */
+static bool video_secondary_isp_ready(NikonZ9State *s)
+{
+    const uint32_t *c=s->engine151_latched[1];
+    const uint32_t *src=s->engine1518[2].config;
+    const uint32_t *a=s->engine1542_config[1];
+    unsigned width=a[0x4c/4],height=a[0x50/4],pitch=a[0x38/4];
+    return s->video_secondary_isp_model && s->engine151_video_stream_model &&
+        s->video_raw_transport_model && s->engine151_active[1] &&
+        engine151_control_ready(s,1) && s->engine1543_active[1] && !s->engine1543_held[1] &&
+        width && height && width<=4096 && height<=2160 && !((width|height)&1) &&
+        width*9==height*16 && pitch==((width*3+255)&~255u) && a[0x3c/4]==pitch &&
+        c[0x200/4]==1 && c[0x204/4]==1 && !c[0x214/4] && c[0x218/4]==1 &&
+        c[0x21c/4]==5 && c[0x220/4]==2 &&
+        c[0x400/4]==(width|(height<<16)) && c[0x450/4]==c[0x400/4] &&
+        c[0x430/4]==width*3 && c[0x434/4]==width*3 &&
+        c[0x480/4]==width*3 && c[0x484/4]==width*3 &&
+        c[0x740/4]==0xe0000000 && !c[0x744/4] &&
+        c[0x9c0/4]==0xe0000000+width*3/2 && !c[0x9c4/4] &&
+        src[0xb0/4]==pitch && src[0xb4/4]==pitch &&
+        src[0xbc/4]==1 && src[0xc0/4]==1 && src[0xc4/4]==0x22 && src[0xd4/4]==0x22;
+}
+/* Functional continuation of the explicitly enabled internal Bayer
+ * source after the old compressed receiver/decoder have been retired.
+ * Each new source-clock input has distinct ownership. This is an authored
+ * sensor-to-ISP approximation, not a physical NR/DSP topology claim. */
+static bool video_secondary_sensor_route(NikonZ9State *s)
+{
+    return s->video_secondary_sensor_model && video_secondary_isp_ready(s) &&
+        !s->engine152c_stream_requested && !s->engine1530_active;
+}
+static void video_secondary_sensor_cancel(NikonZ9State *s)
+{
+    if (s->video_secondary_sensor_ready) {
+        s->video_secondary_sensor_ready=false;s->video_secondary_sensor_cancels++;
+    }
+}
+static bool video_secondary_sensor_receive(NikonZ9State *s)
+{
+    if (!video_secondary_sensor_route(s) || !video_raw_descriptor(s) ||
+        !s->event_timing_active || s->primary_reset_stage ||
+        !(s->engine150c_active&0x4000) || (s->engine_150c_init[0x18/4]&0x4000) ||
+        s->video_raw_packet_owned || s->video_raw_frame_ready || s->video_secondary_sensor_ready ||
+        !s->engine1518[2].config[0x30/4] ||
+        (s->engine151_pending[1]&8) || (s->engine1518[2].pending&0x08100000) ||
+        (s->video_secondary_source_end_model && (s->engine1518[2].pending&0x20000000)) ||
+        s->engine1542_pending[1] || s->engine1542_pending[10] || s->engine1542_pending[11]) {
+        return false;
+    }
+    unsigned width=s->primary_d980_latched[1]>>16,height=s->primary_d980_latched[2]>>16;
+    const NikonRawPixels *input=s->raw_pixels;
+    if (!s->video_secondary_sensor_pixels || s->video_secondary_sensor_pixels->width!=width ||
+        s->video_secondary_sensor_pixels->height!=height) {
+        size_t bytes=(size_t)width*height*2;
+        uint8_t *samples=g_malloc(bytes);
+        for (unsigned y=0;y<height;y++) {
+            unsigned sy=(uint64_t)(y/2)*(input->height/2)/(height/2)*2+(y&1);
+            for (unsigned x=0;x<width;x++) {
+                unsigned sx=(uint64_t)(x/2)*(input->width/2)/(width/2)*2+(x&1);
+                unsigned value=MIN(16383,((uint64_t)input->samples[(size_t)sy*input->width+sx]*16383+input->white/2)/input->white);
+                stw_le_p(samples+((size_t)y*width+x)*2,value);
+            }
+        }
+        NikonRawPixels *pixels=nikon_raw_pixels_new(samples,width,height,0,16383);
+        char *digest=g_compute_checksum_for_data(G_CHECKSUM_SHA256,samples,bytes);
+        g_free(samples);
+        if (!pixels) { g_free(digest);return false; }
+        nikon_raw_pixels_free(s->video_secondary_sensor_pixels);
+        s->video_secondary_sensor_pixels=pixels;
+        g_free(s->video_secondary_sensor_sha256);s->video_secondary_sensor_sha256=digest;
+        for (unsigned ch=0;ch<3;ch++) { g_free(s->raw_pipeline_cache[ch]);s->raw_pipeline_cache[ch]=NULL; }
+    }
+    s->video_secondary_sensor_epoch++;
+    s->video_secondary_sensor_bytes+=(uint64_t)width*height*2;
+    s->video_secondary_sensor_ready=true;
+    return true;
+}
+static bool get_video_secondary_sensor_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_secondary_sensor_model; }
+static void set_video_secondary_sensor_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"secondary sensor input immutable after realization");return;
+    }
+    s->video_secondary_sensor_model=value;
+}
+static char *get_video_secondary_sensor_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"enabled\":%s,\"route\":%s,\"ready\":%s,"
+        "\"epoch\":%"PRIu64",\"consumed\":%"PRIu64",\"sample_bytes\":%"PRIu64
+        ",\"cancels\":%"PRIu64",\"samples_sha256\":\"%s\","
+        "\"scope\":\"functional declared sensor clock/Bayer source to ISP1 after retired receiver/decoder; independent owned input, no original DSP/ISP or physical topology proof\"}",
+        s->video_secondary_sensor_model?"true":"false",video_secondary_sensor_route(s)?"true":"false",
+        s->video_secondary_sensor_ready?"true":"false",s->video_secondary_sensor_epoch,
+        s->video_secondary_sensor_consumed,s->video_secondary_sensor_bytes,s->video_secondary_sensor_cancels,
+        s->video_secondary_sensor_sha256?s->video_secondary_sensor_sha256:"");
+}
+
+static bool get_video_secondary_source_end_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_secondary_source_end_model; }
+static void set_video_secondary_source_end_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"secondary source end immutable after realization");return;
+    }
+    s->video_secondary_source_end_model=value;
+}
+static char *get_video_secondary_source_end_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"enabled\":%s,\"group_transfers\":%u,\"ends\":%"PRIu64
+        ",\"acks\":%"PRIu64",\"cancels\":%"PRIu64",\"pending\":%u,"
+        "\"scope\":\"functional source1 end after three actual secondary sensor/ISP transfers; original bit29 client and W1C own retirement; physical framing/original algorithms unverified\"}",
+        s->video_secondary_source_end_model?"true":"false",s->video_secondary_source_group,
+        s->video_secondary_source_ends,s->video_secondary_source_acks,s->video_secondary_source_cancels,
+        s->engine1518[2].pending&0x20000000);
+}
+
+static bool get_video_receiver_before_supplier_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_receiver_before_supplier_model; }
+static void set_video_receiver_before_supplier_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"video receiver ordering immutable after realization");return;
+    }
+    s->video_receiver_before_supplier_model=value;
+}
+
+static bool get_video_secondary_isp_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_secondary_isp_model; }
+static void set_video_secondary_isp_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"secondary video ISP immutable after realization");return;
+    }
+    s->video_secondary_isp_model=value;
+}
+static char *get_video_secondary_isp_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"enabled\":%s,\"ready\":%s,\"frames\":%"PRIu64
+        ",\"scope\":\"bounded ISP1/internal video RAW to posted Y/UV; original IRQ ownership; functional approximation, original arithmetic/physical route unverified\"}",
+        s->video_secondary_isp_model?"true":"false",video_secondary_isp_ready(s)?"true":"false",
+        s->video_secondary_isp_frames);
+}
+
+static bool get_video_source_end_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_source_end_model; }
+static void set_video_source_end_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"video source frame end immutable after realization");return;
+    }
+    s->video_source_end_model=value;
+}
+static char *get_video_source_end_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"enabled\":%s,\"group_transfers\":%u,\"ends\":%"PRIu64
+        ",\"acks\":%"PRIu64",\"cancels\":%"PRIu64",\"pending\":%u,"
+        "\"scope\":\"experimental source0 group after three actual RAW/ISP transfers; native client unverified, failed native experiment, current recipes disable it\"}",
+        s->video_source_end_model?"true":"false",s->video_source_group_transfers,
+        s->video_source_group_ends,s->video_source_group_acks,s->video_source_group_cancels,
+        s->engine1518[0].pending&0x20000000);
+}
+
+static bool get_video_yuv_output_events_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_yuv_output_events_model; }
+static void set_video_yuv_output_events_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"video YUV output events immutable after realization");return;
+    }
+    s->video_yuv_output_events_model=value;
+}
+static char *get_video_yuv_output_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"enabled\":%s,\"frames\":%"PRIu64
+        ",\"refills\":%"PRIu64",\"banks\":%"PRIu64",\"waits\":%"PRIu64
+        ",\"scope\":\"experimental C0 completion after actual YUV DMA from internal RAW; C1 ownership separate, fresh output banks required; physical/original algorithms unverified\"}",
+        s->video_yuv_output_events_model?"true":"false",s->video_yuv_output_frames,
+        s->video_yuv_output_refills,s->video_yuv_output_banks,s->video_yuv_output_waits);
+}
+
 static bool get_engine151_video_stream_model(Object *obj, Error **errp)
 {
     return NIKON_Z9_LAB(obj)->engine151_video_stream_model;
@@ -12977,6 +13202,7 @@ static bool engine151_write(NikonZ9State *s, hwaddr addr, uint64_t value,
         return true;
     }
     if (off == 0xc && value == 1) {
+        if (i==1 && s->video_secondary_sensor_model) { video_secondary_sensor_cancel(s); }
         if (s->engine151_control_model && s->engine151_active[i]) {
             s->engine151_active[i] = false;
             s->engine151_stops[i]++;
@@ -13316,7 +13542,8 @@ static bool engine1543_video_ready(NikonZ9State *s, unsigned j)
     const uint32_t *src = s->engine1518[0].config;
     if (s->engine1543_valid[j] != 15 || !(c[1] & 0x100) || c[2] != 0x302 || c[3] || c[4] != 0x29 ||
             s->engine1543_buffer_valid[j] != UINT64_C(0x000f000f000f000f) ||
-            (a[1] != 0x202 && a[1] != 0x200) || a[2] != 0x0f010000 || a[3] != 0x71200410 || a[4] != 1 ||
+            (a[1] != 0x202 && a[1] != 0x200 &&
+             !(s->video_receiver_before_supplier_model && a[1]==2)) || a[2] != 0x0f010000 || a[3] != 0x71200410 || a[4] != 1 ||
             !a[0x4c/4] || !a[0x50/4] || a[0x4c/4] > 4096 || a[0x50/4] > 2160 ||
             ((a[0x4c/4] | a[0x50/4]) & 1) || a[0x4c/4] * 9 != a[0x50/4] * 16 ||
             a[0x38/4] != ((a[0x4c/4] * 3 + 255) & ~255U) || a[0x3c/4] != a[0x38/4] ||
@@ -20291,6 +20518,17 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "engine151-control-state", get_engine151_control_state, NULL);
     object_class_property_add_bool(oc, "engine151-capture-pixels-model", get_engine151_capture_pixels_model, set_engine151_capture_pixels_model);
     object_class_property_add_bool(oc,"engine151-video-stream-model",get_engine151_video_stream_model,set_engine151_video_stream_model);
+    object_class_property_add_bool(oc,"video-yuv-output-events-model",get_video_yuv_output_events_model,set_video_yuv_output_events_model);
+    object_class_property_add_bool(oc,"video-source-end-model",get_video_source_end_model,set_video_source_end_model);
+    object_class_property_add_bool(oc,"video-secondary-isp-model",get_video_secondary_isp_model,set_video_secondary_isp_model);
+    object_class_property_add_str(oc,"video-secondary-isp-state",get_video_secondary_isp_state,NULL);
+    object_class_property_add_bool(oc,"video-secondary-sensor-model",get_video_secondary_sensor_model,set_video_secondary_sensor_model);
+    object_class_property_add_str(oc,"video-secondary-sensor-state",get_video_secondary_sensor_state,NULL);
+    object_class_property_add_bool(oc,"video-secondary-source-end-model",get_video_secondary_source_end_model,set_video_secondary_source_end_model);
+    object_class_property_add_bool(oc,"video-receiver-before-supplier-model",get_video_receiver_before_supplier_model,set_video_receiver_before_supplier_model);
+    object_class_property_add_str(oc,"video-secondary-source-end-state",get_video_secondary_source_end_state,NULL);
+    object_class_property_add_str(oc,"video-source-end-state",get_video_source_end_state,NULL);
+    object_class_property_add_str(oc,"video-yuv-output-state",get_video_yuv_output_state,NULL);
     object_class_property_add_str(oc, "engine151-capture-pixels-state", get_engine151_capture_pixels_state, NULL);
     object_class_property_add_bool(oc, "engine151-raw-output-model", get_engine151_raw_output_model, set_engine151_raw_output_model);
     object_class_property_add_str(oc, "engine151-raw-output-state", get_engine151_raw_output_state, NULL);

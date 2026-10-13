@@ -1,4 +1,8 @@
-# Current: shared138
+# Current: shared144
+
+See [shared144](shared144.md) for the current source delta, native failures, independent package checks and reuse limits. The sections below retain their historical build scopes.
+
+# Historical: shared138
 
 See [the shared138 update](shared138.md) for current control changes, validation and limits. The shared136 section below preserves its historical scope.
 

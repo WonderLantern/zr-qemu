@@ -36,6 +36,39 @@ class RecordingPacing:
         from zr_video_callbacks import NativeVideoCallbacks
         self.callbacks = NativeVideoCallbacks(guest)
 
+    def image_devices(self,stage,phase):
+        """Read coarse device ownership through this session's existing QMP."""
+        arguments=self.g.data.get('probe_arguments',{})
+        if not (arguments.get('video_yuv_output_events') or arguments.get('video_source_end') or arguments.get('video_secondary_isp')):
+            return
+        import json
+        value=dict(stage=stage,phase=phase,read_only=True)
+        for property in ('raw-pipeline-state','video-raw-transport-state','video-yuv-output-state','video-source-end-state','video-secondary-isp-state','video-secondary-sensor-state','video-secondary-source-end-state',
+                         'engine1543-control-state','engine151-control-state','engine1518-state',
+                         'engine152c-stream-receiver-state','engine1530-config-state','event1508-channel-state','engine150c-state'):
+            try:
+                state=json.loads(self.g.qmp.command('qom-get',path='/machine',property=property))
+                if property=='engine1543-control-state':
+                    state=dict(blocks=[{k:v for k,v in row.items() if k!='latched'} for row in state['blocks']])
+                elif property=='engine151-control-state':
+                    state=dict(instances=[dict(base=row['base'],active=row['active'],ready=row['ready'],
+                        input_format=row['latched'].get('0x200')) for row in state['instances']])
+                elif property=='engine1518-state':
+                    state=dict(instances=[dict(pending=row['pending'],source_gate=row['config'][0x30//4],
+                        mask=row['config'][8//4],drains=row['drains']) for row in state['instances']])
+                elif property=='engine1530-config-state':
+                    state=dict(enabled=state['enabled'],held=state['held'],front_start=state['front'][8//4],
+                        front_pending=state['front'][0x1c//4],front_mask=state['front'][0x18//4],
+                        decoder_gate=state['core'][0x38//4])
+                elif property=='engine152c-stream-receiver-state':
+                    state={k:state.get(k) for k in ('enabled','requested','pending','jobs','acks','bytes','row','cancels')}
+                elif property=='engine150c-state':
+                    state={k:state.get(k) for k in ('active','stop_requested','stop_done')}
+                value[property]=state
+            except Exception as error:
+                value[property]=dict(observation_error=repr(error))
+        self.g.data.setdefault('video_device_state_snapshots',[]).append(value)
+
     def advance(self, stage, clock):
         if stage not in self.targets:
             return True
@@ -52,6 +85,9 @@ class RecordingPacing:
                 raise RuntimeError(f'Original VIDEO {kind.upper()} returned failure {failure["result"]}')
             self.g.qmp.command('stop')
             try:
+                if not gate.get('device_state_before_sampled'):
+                    self.image_devices(stage,'first-gate-observation')
+                    gate['device_state_before_sampled']=True
                 if self.observer:
                     self.observer.handle()
                 if self.peer:
@@ -90,6 +126,7 @@ class RecordingPacing:
                         file.write_bytes(actor)
                         gate.update(matched=True, matched_clock_seconds=clock.seconds,
                             file=file.name, sha256=sha(file))
+                        self.image_devices(stage,'matched-original-selector')
                 else:
                     gate.pop('transition_clock_seconds', None)
             finally:

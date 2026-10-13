@@ -94,7 +94,8 @@ static uint8_t *primary_d980_pack14(const NikonRawPixels *p,
 
 static bool primary_d980_receive(NikonZ9State *s, bool single_input)
 {
-    if (video_raw_descriptor(s)) { return !single_input && video_raw_receive(s); }
+    if (video_raw_descriptor(s)) { return !single_input &&
+        (video_secondary_sensor_receive(s) || video_raw_receive(s)); }
     if (!s->primary_d980_stream_model || (!single_input && !s->event_timing_active) ||
         s->primary_reset_stage || !(s->engine150c_active & 0x4000) ||
         (s->engine_150c_init[0x18 / 4] & 0x4000) || s->primary_d980_pending) {

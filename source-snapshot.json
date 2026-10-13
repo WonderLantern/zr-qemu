@@ -1,31 +1,31 @@
 {
   "schema": 1,
-  "date": "2026-10-13",
+  "date": "2026-10-14",
   "kind": "experimental-source-development-snapshot",
-  "shared_revision": 138,
-  "private_reference_binary_sha256": "c8a465e9729298ee16c09b9c0926931bfb61209ed4769291d332a1e0f1f9d0ba",
+  "shared_revision": 144,
+  "private_reference_binary_sha256": "3ac25deb7f34d4ed1dbc291ae9b5bc82303e142dde9a4e26bf4e692a8a09f1b2",
   "qemu_version": "10.2.4",
   "original_algorithms_accepted": false,
   "camera_h265_recording_accepted": false,
   "camera_r3d_recording_accepted": false,
-  "device_regression_guests": 60,
-  "device_regression_checks": 214,
+  "device_regression_guests": 10,
+  "device_regression_checks": 34,
   "original_input_recipe_checks": 82,
   "compiled_source_sha256": {
     "nikon-z9-thumbnail-nv16.h": "3af60d459a994401e0a847b0dc3746b5a0207ee8af72eedc8ca752843561504f",
     "nikon-expeed-motion.h": "d30fca0dbf96a65f634ab8305156d148f149c45a0d8cb86170ea0d06e3ed1bde",
     "nikon-z9-pcie.h": "0902b20b2cd34a3e8469df6b41f97f912054037c8863cca8575edb73424315fa",
     "nikon-zr-lab.c": "4c463d66cc7b5a9e4d5b72c265c000a58f13ab96e5dcdb47750657e09097a4de",
-    "nikon-z9-d980.h": "0593ee7090f8cf4c851ab177722ca91473c1ebf15a951e241fcbcd320f4b9cee",
+    "nikon-z9-d980.h": "3d478b94b880a187f6ce83143a4b2f76164706de65543176383a6596c6017356",
     "nikon-expeed-dsp-boot.h": "8fd87f82a0c30007e9ab1f4ae1d13798ac354a3957675f33fb9395eb52f1a724",
     "nikon-raw-pixels.h": "92ce49075054677a490aeea027f1ddf133a90b866fccab88f870e05742e95bf7",
     "nikon-z9-capture-nv16.h": "c795136e5531992d9f15f43afa88c4b0180d9902564d3644936ab674d89a8c53",
     "nikon-wave5-codec.h": "1c4311df74388b6c151a6ea2f0710c183bcc17549ac962f0dd6e9fe8e6e4b540",
-    "nikon-z9-pixels.h": "6bfe4f26138015f758bf16ff1bc6040870749b91e34adcc60cb1498e8000637d",
+    "nikon-z9-pixels.h": "7d4f2008be1e1d5a0e679322f1a57a992c02e91c454ad38f3bc6b7dfce5f14f3",
     "nikon-z9-wave5.h": "970cea92617a20e9394f24fd88b517a93929178706a4c6cf35226b9a45b188fa",
     "nikon-expeed-lossless.h": "6f6ef0da9d01571dcf3470ccf1b160fb1c50c5859b6b70ef78d63b4bc97e9100",
     "nikon-z9-video-raw.h": "7a64218ffc0ad571a2702c92fa7168669f3b418f517146114f47dcf518a3de38",
-    "nikon-z9-lab.c": "409cb1385e597403871b0c8bb43461e06a07451362428279ca4b4dfd837296bb",
+    "nikon-z9-lab.c": "90c4490ddbf1fbe204e00055951a9988e9e5abe14e072c48968f11a39eb900dc",
     "nikon-expeed-correction.h": "6718b4c8f190960db588e42958c18db125fffd8cc6d68649be8d20d64d33ec77",
     "nikon-z9-jpeg.h": "48a9619eae30de870a436baff5e698061c30df88d8fd66a98ae8ba7dc5bc94e6"
   },
@@ -39,11 +39,11 @@
     "qemu/nikon-raw-pixels.h": "92ce49075054677a490aeea027f1ddf133a90b866fccab88f870e05742e95bf7",
     "qemu/nikon-wave5-codec.h": "1c4311df74388b6c151a6ea2f0710c183bcc17549ac962f0dd6e9fe8e6e4b540",
     "qemu/nikon-z9-capture-nv16.h": "c795136e5531992d9f15f43afa88c4b0180d9902564d3644936ab674d89a8c53",
-    "qemu/nikon-z9-d980.h": "0593ee7090f8cf4c851ab177722ca91473c1ebf15a951e241fcbcd320f4b9cee",
+    "qemu/nikon-z9-d980.h": "3d478b94b880a187f6ce83143a4b2f76164706de65543176383a6596c6017356",
     "qemu/nikon-z9-jpeg.h": "562ae7a1ebbc3fa5c7631bbb5a885630bac0bb2d8479738e90f3c4cbce7f6798",
-    "qemu/nikon-z9-lab.c": "429243472b527d95096f7609f1bb29c71c415e5db2fb46f59c8f289a32f4b338",
+    "qemu/nikon-z9-lab.c": "8d0ee1a0fc7c7a6bc2b09b93af7218ebc6192e5dff62d24aa8c0f8862712b16c",
     "qemu/nikon-z9-pcie.h": "0902b20b2cd34a3e8469df6b41f97f912054037c8863cca8575edb73424315fa",
-    "qemu/nikon-z9-pixels.h": "6bfe4f26138015f758bf16ff1bc6040870749b91e34adcc60cb1498e8000637d",
+    "qemu/nikon-z9-pixels.h": "6a9067eaced922b77db5f2d5e10766945611d3e801368ac4c89be9a1909e5d4f",
     "qemu/nikon-z9-thumbnail-nv16.h": "3af60d459a994401e0a847b0dc3746b5a0207ee8af72eedc8ca752843561504f",
     "qemu/nikon-z9-video-raw.h": "7a64218ffc0ad571a2702c92fa7168669f3b418f517146114f47dcf518a3de38",
     "qemu/nikon-z9-wave5.h": "970cea92617a20e9394f24fd88b517a93929178706a4c6cf35226b9a45b188fa",
@@ -70,7 +70,25 @@
     }
   },
   "status_peer_host_checks": 134,
-  "public_validation": {
+  "latest_private_native_video": [
+    {
+      "run": "zr-qemu-531-main10-receiver-order-whole",
+      "accepted": false,
+      "error": "TimeoutError('Original VIDEO dispatch did not settle to 1 after input state98')",
+      "private_build_sha256": "3ac25deb7f34d4ed1dbc291ae9b5bc82303e142dde9a4e26bf4e692a8a09f1b2",
+      "codec_input_bytes": 0,
+      "codec_pictures": 0
+    },
+    {
+      "run": "zr-qemu-532-r3d-receiver-order-whole",
+      "accepted": false,
+      "error": "TimeoutError('Original VIDEO dispatch did not settle to 0 after input state82')",
+      "private_build_sha256": "3ac25deb7f34d4ed1dbc291ae9b5bc82303e142dde9a4e26bf4e692a8a09f1b2",
+      "codec_input_bytes": 0,
+      "codec_pictures": 0
+    }
+  ],
+  "previous_shared138_public_validation": {
     "build_completed": true,
     "binary_sha256": "09b5406f045bbd32a306983955a419a3ea02cb623cc0f8ba4830e5c0f2863025",
     "firmware_free_python_tests": 16,
@@ -84,24 +102,46 @@
     "full_native_photo_port_requalified": false,
     "full_native_movie_port_requalified": false
   },
-  "latest_private_native_video": [
-    {
-      "run": "zr-qemu-513-main10-selected-header-whole",
-      "accepted": false,
-      "error": "TimeoutError('Original VIDEO dispatch did not settle to 1 after input state98')",
-      "private_build_sha256": "c8a465e9729298ee16c09b9c0926931bfb61209ed4769291d332a1e0f1f9d0ba",
-      "codec_input_bytes": 0,
-      "codec_pictures": 0,
-      "retained_starts": 0
-    },
-    {
-      "run": "zr-qemu-514-r3d-selected-header-whole",
-      "accepted": false,
-      "error": "TimeoutError('Original VIDEO dispatch did not settle to 0 after input state82')",
-      "private_build_sha256": "c8a465e9729298ee16c09b9c0926931bfb61209ed4769291d332a1e0f1f9d0ba",
-      "codec_input_bytes": 0,
-      "codec_pictures": 0,
-      "retained_starts": 0
-    }
-  ]
+  "public_validation": {
+    "build_completed": true,
+    "binary_sha256": "8450a987ea4b376f4a9c751de9c017ca8314c02896202c609f7af7040f3d9533",
+    "firmware_free_python_tests": 16,
+    "c_pixel_checks_passed": true,
+    "service_core_checks": 13,
+    "firmware_free_realizations": 4,
+    "video_option_checks": 72,
+    "realized_models": [
+      "nikon-z9-lab",
+      "nikon-zr-lab"
+    ],
+    "full_native_photo_port_requalified": false,
+    "full_native_movie_port_requalified": false,
+    "native_runner_help_passed": true,
+    "lifecycle_profile_validated": true,
+    "lifecycle_plugin_compiled_with_werror": true
+  },
+  "public_compiled_source_sha256": {
+    "nikon-z9-thumbnail-nv16.h": "3af60d459a994401e0a847b0dc3746b5a0207ee8af72eedc8ca752843561504f",
+    "nikon-expeed-motion.h": "d30fca0dbf96a65f634ab8305156d148f149c45a0d8cb86170ea0d06e3ed1bde",
+    "nikon-z9-pcie.h": "0902b20b2cd34a3e8469df6b41f97f912054037c8863cca8575edb73424315fa",
+    "nikon-zr-lab.c": "ac1919fb922aed4eb04c630f831ecdea21a23098b132ba59a829d966eabb2b46",
+    "nikon-z9-d980.h": "3d478b94b880a187f6ce83143a4b2f76164706de65543176383a6596c6017356",
+    "nikon-expeed-dsp-boot.h": "8fd87f82a0c30007e9ab1f4ae1d13798ac354a3957675f33fb9395eb52f1a724",
+    "nikon-raw-pixels.h": "92ce49075054677a490aeea027f1ddf133a90b866fccab88f870e05742e95bf7",
+    "nikon-z9-capture-nv16.h": "c795136e5531992d9f15f43afa88c4b0180d9902564d3644936ab674d89a8c53",
+    "nikon-wave5-codec.h": "1c4311df74388b6c151a6ea2f0710c183bcc17549ac962f0dd6e9fe8e6e4b540",
+    "nikon-z9-pixels.h": "6a9067eaced922b77db5f2d5e10766945611d3e801368ac4c89be9a1909e5d4f",
+    "nikon-z9-wave5.h": "970cea92617a20e9394f24fd88b517a93929178706a4c6cf35226b9a45b188fa",
+    "nikon-expeed-lossless.h": "6f6ef0da9d01571dcf3470ccf1b160fb1c50c5859b6b70ef78d63b4bc97e9100",
+    "nikon-z9-video-raw.h": "7a64218ffc0ad571a2702c92fa7168669f3b418f517146114f47dcf518a3de38",
+    "nikon-z9-lab.c": "8d0ee1a0fc7c7a6bc2b09b93af7218ebc6192e5dff62d24aa8c0f8862712b16c",
+    "nikon-expeed-correction.h": "6718b4c8f190960db588e42958c18db125fffd8cc6d68649be8d20d64d33ec77",
+    "nikon-z9-jpeg.h": "562ae7a1ebbc3fa5c7631bbb5a885630bac0bb2d8479738e90f3c4cbce7f6798"
+  },
+  "validation_scopes": {
+    "device_regressions": "private shared144 receiver-order batch; diagnostic, not native camera acceptance",
+    "status_peer_and_input_recipe": "unchanged contracts; earlier shared138 evidence retained",
+    "public_package": "two builder invocations using the same verified upstream cache; matching overlays and binaries",
+    "native_video": "unchanged original ZR firmware, both shared144 workflows failed and stopped"
+  }
 }

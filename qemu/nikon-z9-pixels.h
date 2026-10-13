@@ -86,18 +86,23 @@ static void raw_pipeline_tick(void *opaque)
 {
     NikonZ9State *s = opaque;
     unsigned row = s->raw_pipeline_row;
-    bool video = s->engine151_video_stream_model && s->engine151_active[0] &&
+    bool primary_video = s->engine151_video_stream_model && s->engine151_active[0] &&
         s->engine151_latched[0][0x200/4] == 1;
-    unsigned isp = video ? 0 : 1, source = video ? 0 : 2, input = video ? 1 : 0;
+    bool secondary_video = !primary_video && video_secondary_isp_ready(s);
+    bool video = primary_video || secondary_video;
+    unsigned isp = primary_video ? 0 : 1, source = primary_video ? 0 : 2, input = video ? 1 : 0;
     uint64_t ys[3], uvs[3], total = 0;
     unsigned widths[3], heights[3], strides[3];
     bool halves[3];
     if (!s->raw_pipeline_model) { return; }
     timer_mod(s->raw_pipeline_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 33333333);
     bool internal = video && s->video_raw_transport_model;
-    const NikonRawPixels *pixel_source = internal ? s->video_raw_pixels : s->raw_pixels;
+    bool sensor_secondary=secondary_video && video_secondary_sensor_route(s);
+    bool yuv_events=internal && s->video_yuv_output_events_model;
+    const NikonRawPixels *pixel_source = sensor_secondary ? s->video_secondary_sensor_pixels :
+        internal ? s->video_raw_pixels : s->raw_pixels;
     if (internal) {
-        if (!s->video_raw_frame_ready || !pixel_source) { return; }
+        if (!(sensor_secondary ? s->video_secondary_sensor_ready : s->video_raw_frame_ready) || !pixel_source) { return; }
         if (!s->video_raw_ring_latched) {
             /* Native video C1 headers own the stream; C0 posts its global
              * output slots without a separate C0 source-start transaction. */
@@ -108,12 +113,19 @@ static void raw_pipeline_tick(void *opaque)
             const uint64_t addresses=UINT64_C(0xfff0fff0fff0fff0);
             if ((s->engine1543_buffer_valid[0] & addresses) != addresses) { return; }
             memcpy(s->engine1543_latched[0],s->engine1542_config[10],sizeof(s->engine1543_latched[0]));
-            s->raw_pipeline_bank=0;s->raw_pipeline_row=0;row=0;
+            s->raw_pipeline_bank=yuv_events?(s->engine1542_config[10][2]&1):0;
+            s->raw_pipeline_row=0;row=0;
             s->raw_pipeline_wait_bank=false;s->raw_pipeline_refill_notified=false;
             s->video_raw_ring_latched=true;s->video_raw_ring_latches++;
-            s->raw_pipeline_bank_written[0]=0;
+            s->raw_pipeline_bank_written[s->raw_pipeline_bank]=0;
         }
     }
+
+    /* Receiver START is valid before its already configured A1 producer
+     * is enabled. It grants no output transfer: keep an actual decoded or
+     * owned sensor input until the original supplier enable is submitted. */
+    if (video && s->video_receiver_before_supplier_model &&
+        !(s->engine1542_config[1][4/4]&0x200)) { return; }
 
     /* Stopped-source reset profile: input clock and primary source unit
      * own new pixel work. Holding/resetting primary cancels future work,
@@ -132,6 +144,8 @@ static void raw_pipeline_tick(void *opaque)
         (video && s->engine1542_pending[11]) ||
         (s->raw_pipeline_1514_completion_model && (s->engine151_pending[isp] & 8)) ||
         (s->raw_pipeline_151c_completion_model && (s->engine1518[source].pending & 0x08100000)) ||
+        (s->video_source_end_model && source==0 && (s->engine1518[0].pending&0x20000000)) ||
+        (sensor_secondary && s->video_secondary_source_end_model && (s->engine1518[2].pending&0x20000000)) ||
         (s->event1508_global1_model && (s->event_global1_pending & 0x10))) { return; }
     /* Request the following batch separately, before its final frame.
      * The original callback wakes the frame task before storing its refill
@@ -141,6 +155,7 @@ static void raw_pipeline_tick(void *opaque)
     if (row == 3 && !s->raw_pipeline_refill_notified) {
         s->raw_pipeline_refill_notified = true;
         s->engine1542_pending[internal ? 11 : 10] |= 8;
+        if (yuv_events) { s->engine1542_pending[10]|=8;s->video_yuv_output_refills++; }
         raw_pipeline_irq_update(s);
         return;
     }
@@ -173,7 +188,9 @@ static void raw_pipeline_tick(void *opaque)
             if (internal) { s->video_raw_ring_latches++; }
             bank = s->raw_pipeline_bank = selected;
             s->raw_pipeline_wait_bank = false;
+            if (yuv_events) { s->video_yuv_output_banks++; }
         } else {
+            if (yuv_events) { s->video_yuv_output_waits++; return; }
             /* Continuous capture retains the current complete table until
              * its replacement is available. 260/262's artificial stall
              * also stopped the combined input boundaries and deadlocked
@@ -263,6 +280,25 @@ static void raw_pipeline_tick(void *opaque)
         Z9Engine1518 *e = &s->engine1518[source];
         e->pending |= 0x08100000;
         e->stream_frames++;
+        /* Original source1 worker compares its data counter3 and then
+         * waits for800000. Publish source2 bit29 only after these three
+         * completed owned sensor inputs and all six actual Y/UV writes.
+         * Never modify its wait flags, callbacks or acknowledge on behalf. */
+        if (sensor_secondary && s->video_secondary_source_end_model) {
+            s->video_secondary_source_group++;
+            if (s->video_secondary_source_group==3) {
+                e->pending|=0x20000000;s->video_secondary_source_ends++;
+            }
+        }
+        /* Experimental source0 grouping advances only on completed decoded
+         * RAW transfers. Its proposed native END client remains unverified;
+         * this failed experiment is disabled in current VIDEO recipes. */
+        if (internal && video && source==0 && s->video_source_end_model) {
+            s->video_source_group_transfers++;
+            if (s->video_source_group_transfers==3) {
+                e->pending|=0x20000000;s->video_source_group_ends++;
+            }
+        }
         engine1518_update_irq(e);
     }
     /* Complete the configured primary/secondary input pair only
@@ -275,11 +311,14 @@ static void raw_pipeline_tick(void *opaque)
         s->raw_pipeline_input_pair_completions++;
         engine150c_stop_irq_update(s);
     }
-    if (internal) {
+    if (sensor_secondary) {
+        s->video_secondary_sensor_consumed=s->video_secondary_sensor_epoch;s->video_secondary_sensor_ready=false;
+    } else if (internal) {
         s->video_raw_consumed_epoch=s->video_raw_decoded_epoch;s->video_raw_frame_ready=false;
     }
     s->raw_pipeline_frames++;
     s->raw_pipeline_video_frames += video;
+    s->video_secondary_isp_frames += secondary_video;
     s->raw_pipeline_bytes += total;
     s->raw_pipeline_row = (row + 1) & 3;
     /* The original40e94934 callback consumes A0 bits0/4 as input boundary
@@ -290,7 +329,11 @@ static void raw_pipeline_tick(void *opaque)
         s->engine1542_pending[input] |= 0x11;
     }
     if (video) { s->engine1542_pending[11] |= 1; }
-    if (!internal) { s->engine1542_pending[10] |= 1; }
+    /* C1 reports RAW supplier ownership. C0 reports the three actual
+     * output plane transfers above. Neither event ACKs the other; the
+     * existing pending guard prevents overwriting output until native W1C. */
+    if (!internal || yuv_events) { s->engine1542_pending[10] |= 1; }
+    if (yuv_events) { s->video_yuv_output_frames++; }
     if (row == 3) {
         s->raw_pipeline_refill_notified = false;
         s->raw_pipeline_wait_bank = true;

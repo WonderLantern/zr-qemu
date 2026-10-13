@@ -8,7 +8,7 @@
 #include <qemu-plugin.h>
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
-typedef struct { uint64_t pc; char name[64]; } Point;
+typedef struct { uint64_t pc, skip_x0; bool filtered; uint64_t skipped; char name[64]; } Point;
 typedef struct { uint64_t address; unsigned bytes; bool from_register; char name[64]; } Region;
 typedef struct {
     struct qemu_plugin_register *reg[32];
@@ -21,6 +21,7 @@ static unsigned point_count, region_count;
 static FILE *out;
 static GMutex lock;
 static uint64_t records, dropped;
+static uint64_t maximum_records = 8192;
 static bool label_ok(const char *s)
 {
     if (!*s) return false;
@@ -41,7 +42,13 @@ static void executed(unsigned int index, void *opaque)
     CPU *cpu = &cpus[index];
     Point *point = opaque;
     g_mutex_lock(&lock);
-    if (records >= 8192) { dropped++; g_mutex_unlock(&lock); return; }
+    /* Explicit profile-selected periodic events need no RAM snapshots.
+     * Count them separately; they are filtered observations, not dropped
+     * frame work. CPU/register/memory execution is unchanged. */
+    if (point->filtered && reg_value(cpu, 0) == point->skip_x0) {
+        point->skipped++; g_mutex_unlock(&lock); return;
+    }
+    if (records >= maximum_records) { dropped++; g_mutex_unlock(&lock); return; }
     fprintf(out, "{\"index\":%"PRIu64",\"host_us\":%"G_GINT64_FORMAT
             ",\"cpu\":%u,\"pc\":\"0x%"PRIx64"\",\"name\":\"%s\",\"registers\":[",
             records++, g_get_monotonic_time(), index, point->pc, point->name);
@@ -113,7 +120,14 @@ static void initialized(qemu_plugin_id_t id, unsigned int index)
 static void finished(qemu_plugin_id_t id, void *opaque)
 {
     (void)id; (void)opaque;
-    fprintf(out, "{\"finished\":true,\"records\":%"PRIu64",\"dropped\":%"PRIu64"}\n", records, dropped);
+    fprintf(out, "{\"finished\":true,\"records\":%"PRIu64",\"dropped\":%"PRIu64
+            ",\"maximum_records\":%"PRIu64",\"filtered\":{", records, dropped, maximum_records);
+    bool first = true;
+    for (unsigned i = 0; i < point_count; i++) if (points[i].filtered) {
+        fprintf(out, "%s\"%s\":%"PRIu64, first ? "" : ",", points[i].name, points[i].skipped);
+        first = false;
+    }
+    fputs("}}\n", out);
     fclose(out);
 }
 QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
@@ -127,12 +141,21 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     uint64_t address;
     unsigned bytes;
     bool valid = true;
+    bool limit_set = false;
     while (fgets(line, sizeof(line), input)) {
         int fields = sscanf(line, " %c %63s %"SCNx64" %u %c", &type, name, &address, &bytes, &extra);
         if (fields != 4 || !label_ok(name)) { valid = false; break; }
         if (type == 'P' && bytes == 0 && point_count < G_N_ELEMENTS(points) &&
                 address >= 0x40160000 && address < 0x45000000 && !(address & 3)) {
             Point *p = &points[point_count++]; p->pc = address; g_strlcpy(p->name, name, sizeof(p->name));
+        } else if (type == 'L' && !strcmp(name, "maximum_records") && bytes == 0 &&
+                   !limit_set && address >= 64 && address <= 65536) {
+            maximum_records = address; limit_set = true;
+        } else if (type == 'S' && bytes == 0) {
+            Point *selected = NULL;
+            for (unsigned i = 0; i < point_count; i++) if (!strcmp(points[i].name, name)) selected = &points[i];
+            if (!selected || selected->filtered) { valid = false; break; }
+            selected->filtered = true; selected->skip_x0 = address;
         } else if (region_count < G_N_ELEMENTS(regions) && bytes && bytes <= 4096 &&
                 ((type == 'M' && address >= UINT64_C(0xa00000000) &&
                   address <= UINT64_C(0xa40000000) - bytes) || (type == 'D' && address < 32))) {

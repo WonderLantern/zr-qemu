@@ -16,10 +16,19 @@ def sha(path):
 def validate_bindings(profile):
     """Check the C observer's fixed capacities before starting a guest."""
     points, regions = profile.get('points'), profile.get('memory')
+    maximum = profile.get('maximum_records',8192)
+    if type(maximum) is not int or not 64 <= maximum <= 65536:
+        raise ValueError('Lifecycle record limit requires 64..65536')
     if not isinstance(points, dict) or not 1 <= len(points) <= 64:
         raise ValueError('Lifecycle observer requires 1..64 instruction points')
     if not isinstance(regions, dict) or len(regions) > 8:
         raise ValueError('Lifecycle observer permits at most 8 memory regions')
+    filters=profile.get('skip_x0',{})
+    if not isinstance(filters,dict) or not set(filters).issubset(points):
+        raise ValueError('Only explicitly bound points may filter X0')
+    for value in filters.values():
+        if not isinstance(value,str) or not 0 <= int(value,0) < 1<<64:
+            raise ValueError('One unsigned X0 value required')
     for name in (*points, *regions):
         if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_]{1,63}', name):
             raise ValueError('Lifecycle labels require 1..63 ASCII letters, digits or underscores')
@@ -63,6 +72,9 @@ def attach(guest, profile_path):
     lines = []
     for name, address in profile['points'].items():
         lines.append(f'P {name} {int(address, 0):x} 0')
+    lines.append(f'L maximum_records {profile.get("maximum_records",8192):x} 0')
+    for name,value in profile.get('skip_x0',{}).items():
+        lines.append(f'S {name} {int(value,0):x} 0')
     for name, region in profile['memory'].items():
         if 'register' in region:
             if 'address' in region or type(region['register']) is not int or not 0 <= region['register'] < 32:
@@ -76,5 +88,6 @@ def attach(guest, profile_path):
     (guest.out/source.name).write_bytes(source.read_bytes())
     guest.command += ['-plugin', f'{plugin},bindings={bindings},out={guest.out}/lifecycle.jsonl']
     guest.data['lifecycle_observer'] = dict(source_sha256=sha(source), plugin_sha256=sha(plugin),
-        profile_sha256=sha(profile_path), log='lifecycle.jsonl', maximum_records=8192,
+        profile_sha256=sha(profile_path), log='lifecycle.jsonl', maximum_records=profile.get('maximum_records',8192),
+        skip_x0=profile.get('skip_x0',{}),
         scope='Read-only non-stopping native callbacks and bounded work RAM; no device completion or guest edits')
