@@ -72,22 +72,30 @@
   "status_peer_host_checks": 134,
   "latest_private_native_video": [
     {
-      "run": "zr-qemu-537-main10-running-isp-whole",
-      "result_sha256": "091dd0f2578dff2aa383d1528eb1bef9af90316c05498eacfeda4c07b6754d74",
+      "run": "zr-qemu-543-main10-frame-graph-whole",
+      "result_sha256": "2ffcf11077a0ed6aace531da8207791794f32d65a92fb430b6a32dde9c9b90b5",
       "accepted": false,
-      "error": "TimeoutError('Original VIDEO dispatch did not settle to 1 after input state98')",
+      "error": "AssertionError('bounded key sequence consumed by distinct original handlers')",
       "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
+      "owned_stopped": true,
       "codec_input_bytes": 0,
-      "codec_pictures": 0
+      "codec_pictures": 0,
+      "complete_graph_records": 38782,
+      "graph_audit_sha256": "bd7b28a6b326f092ef49616c04863ecf8ae4c22b47ad0f94770d6935b9d66801",
+      "scope": "ZR native VIDEO workflow on shared146b; not a Z9 movie test"
     },
     {
-      "run": "zr-qemu-538-r3d-running-isp-whole",
-      "result_sha256": "05c3fa26c8cf5843172ecbd821d40f5cdae5331fad3ba3ae01076de54a9491ab",
+      "run": "zr-qemu-544-r3d-frame-graph-whole",
+      "result_sha256": "c7d57c9e2f950c083fda07f0b050a4a6806cd8bdde1e6ee3a395a6e4b72ee26a",
       "accepted": false,
       "error": "TimeoutError('Original VIDEO dispatch did not settle to 0 after input state82')",
       "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
+      "owned_stopped": true,
       "codec_input_bytes": 0,
-      "codec_pictures": 0
+      "codec_pictures": 0,
+      "complete_graph_records": 20862,
+      "graph_audit_sha256": "1d07ca5e0530960d169b96e9528d0131beb681fc1f79bdd5b17559f99a70dedf",
+      "scope": "ZR native VIDEO workflow on shared146b; not a Z9 movie test"
     }
   ],
   "previous_shared138_public_validation": {
@@ -200,5 +208,37 @@
     "all_capture_helpers_imported_without_private_research_checkout": true,
     "full_native_photo_port_requalified": false
   },
-  "capture_audit_dependency_preflight": true
+  "capture_audit_dependency_preflight": true,
+  "previous_shared146_native_video": [
+    {
+      "run": "zr-qemu-537-main10-running-isp-whole",
+      "result_sha256": "091dd0f2578dff2aa383d1528eb1bef9af90316c05498eacfeda4c07b6754d74",
+      "accepted": false,
+      "error": "TimeoutError('Original VIDEO dispatch did not settle to 1 after input state98')",
+      "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
+      "codec_input_bytes": 0,
+      "codec_pictures": 0
+    },
+    {
+      "run": "zr-qemu-538-r3d-running-isp-whole",
+      "result_sha256": "05c3fa26c8cf5843172ecbd821d40f5cdae5331fad3ba3ae01076de54a9491ab",
+      "accepted": false,
+      "error": "TimeoutError('Original VIDEO dispatch did not settle to 0 after input state82')",
+      "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
+      "codec_input_bytes": 0,
+      "codec_pictures": 0
+    }
+  ],
+  "public_photo_requalification_attempt": {
+    "run": "zr-public-shared146-repeated-raw-whole1",
+    "result_sha256": "13629338d0d31cd833f83231805a4e7544937831c6174a6d8ff82ae22817da33",
+    "binary_sha256": "e2946a488e90cb7fc022acb575c81ea8fb5acdd9c2ad5ac54e0e544791966c2f",
+    "owned_stopped": true,
+    "error": "AssertionError('bounded key sequence consumed by distinct original handlers')",
+    "full_native_photo_port_requalified": false,
+    "raw_producer_dumps": 0,
+    "jpeg_completed_dumps": 0,
+    "all_contacts_consumed": false,
+    "scope": "Current public ZR photo recipe failed before independently audited files; historical private ZR acceptance is separate"
+  }
 }
