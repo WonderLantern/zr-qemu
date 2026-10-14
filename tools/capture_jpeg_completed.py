@@ -2,7 +2,7 @@
 """Read actual complete JPEG and finite small/mid input at original ISR entry."""
 import json
 from pathlib import Path
-from shared_z9_build import sha
+from probe import sha
 
 
 def dump_completed(g, observation, registers):

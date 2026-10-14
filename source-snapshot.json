@@ -160,7 +160,7 @@
   "public_validation": {
     "passed": true,
     "binary_sha256": "e2946a488e90cb7fc022acb575c81ea8fb5acdd9c2ad5ac54e0e544791966c2f",
-    "firmware_free_python_tests": 24,
+    "firmware_free_python_tests": 25,
     "c_pixel_checks_passed": true,
     "firmware_free_realizations": 4,
     "video_option_checks": 96,
@@ -191,5 +191,13 @@
     "fault_bytes_never_skipped": true,
     "qemu_device_code_changed": false,
     "public_z9_capture_requalification": "first run stopped on host ENODATA; rerun ongoing, full camera acceptance not claimed"
+  },
+  "capture_helper_import_fix": {
+    "date": "2026-10-14",
+    "jpeg_helper_sha256": "d8c155233fc63135bbf77e150e6fb31c7e0377f7fa3f6c843fcd3187ca1b15b3",
+    "thumbnail_helper_sha256": "27e00b2142a2af5a1f1c7adb8e519ebc841a10c55acb475d745d42090970a3a3",
+    "test_sha256": "3024cb24efb0e7febfdd857c0475e6ee19a9b1eb2405cf7c3f4e1c16fc1c7b74",
+    "all_capture_helpers_imported_without_private_research_checkout": true,
+    "full_native_photo_port_requalified": false
   }
 }

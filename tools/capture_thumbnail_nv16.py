@@ -3,7 +3,7 @@
 import json
 import struct
 from pathlib import Path
-from shared_z9_build import sha
+from probe import sha
 
 
 def dump_completed(g, states, registers):

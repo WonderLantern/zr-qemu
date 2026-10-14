@@ -105,3 +105,17 @@ split markers, persistent failure, unrelated errors, cursor-preserving reopen,
 concurrent append and truncation. Full Python suites now pass 21 tests in Z9
 and 24 in ZR. This host correction does not qualify the camera workflow;
 the actual two-photo/full-file/menu/live-view rerun remains separate.
+
+
+## Standalone capture helper imports
+
+After the log-read fix, the Z9 rerun reached the original shooting interface
+and produced a JPEG job, then exposed two stale hash-helper imports from the
+private research build module. JPEG completion and thumbnail helpers now use
+the package's own `probe.sha`; the ZR native JPEG helper is corrected too.
+A firmware-free test imports the complete capture helper set from each public
+package, including paths previously loaded only during native photography.
+The complete suites pass 22 tests for Z9 and 25 for ZR. The research exporters
+retain the same portable import mapping for future snapshots. QEMU source and
+binary hashes remain unchanged; the full two-photo/NEF/menu/live-view rerun
+uses a fresh directory and still requires independent native acceptance.

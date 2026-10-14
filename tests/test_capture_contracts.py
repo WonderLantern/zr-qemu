@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Firmware-free input, completion and storage ownership regressions."""
 import json
+import importlib
 from pathlib import Path
 import struct
 import sys
@@ -17,6 +18,12 @@ from virtual_recording_card import create
 
 
 class CaptureContracts(unittest.TestCase):
+    def test_full_capture_helpers_import_without_research_checkout(self):
+        tools=Path(__file__).resolve().parents[1]/'tools'
+        for path in sorted(tools.glob('capture_*.py')):
+            with self.subTest(module=path.stem):
+                importlib.import_module(path.stem)
+
     def test_14bit_samples_keep_full_range(self):
         data = generate(32, 16, bits=14)
         self.assertEqual(struct.unpack('<8s6I', data[:32]), (b'NZ9RAW1\0',32,16,14,0,0,16383))
