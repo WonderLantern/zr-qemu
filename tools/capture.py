@@ -22,6 +22,11 @@ def main():
     a = p.parse_args()
     if not 15 <= a.seconds <= 600:
         p.error('--seconds must be 15..600')
+    if a.audit:
+        try:
+            import rawpy
+        except ImportError:
+            p.error('Independent NEF auditing requires rawpy; install requirements-capture.txt in this Python environment before starting capture')
     output = output_path(a.output)
     with a.raw.open('rb') as f:
         header = f.read(32)

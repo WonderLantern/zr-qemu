@@ -199,5 +199,6 @@
     "test_sha256": "3024cb24efb0e7febfdd857c0475e6ee19a9b1eb2405cf7c3f4e1c16fc1c7b74",
     "all_capture_helpers_imported_without_private_research_checkout": true,
     "full_native_photo_port_requalified": false
-  }
+  },
+  "capture_audit_dependency_preflight": true
 }
