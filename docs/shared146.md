@@ -88,3 +88,20 @@ and 16 compiled-source hashes and the output binaries match:
 Python tests, C pixel checks, four stopped-CPU two-model realizations with
 96 default/off/on/immutability checks and 13 authored service-core checks.
 No Nikon firmware was executed by these public package checks.
+
+## Host log-read correction
+
+A current public Z9 two-photo run exited on host `ENODATA` while reading its
+append-only QEMU log on the Windows-mounted workspace. The shared host guard
+now scans a finite append snapshot in 64 KiB chunks, retries only transient
+ENODATA/EAGAIN/EINTR within a bounded second, and reopens at the last committed
+byte offset. Failed reads cannot skip consumed fault-marker bytes; split
+markers remain detectable. Persistent unavailability, other errors, log
+truncation and unexpected EOF still abort. This changes host file handling;
+QEMU devices, firmware, clocks and camera success conditions are unchanged.
+
+Eight fault-integrity tests cover partial-consumption errors, bounded chunks,
+split markers, persistent failure, unrelated errors, cursor-preserving reopen,
+concurrent append and truncation. Full Python suites now pass 21 tests in Z9
+and 24 in ZR. This host correction does not qualify the camera workflow;
+the actual two-photo/full-file/menu/live-view rerun remains separate.
