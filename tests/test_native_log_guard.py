@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Fault-marker integrity across actual append/read boundaries and I/O failures."""
 import errno
+import importlib.util
 from pathlib import Path
 import sys
 import tempfile
@@ -8,13 +9,21 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
+import native_log_guard
 from native_log_guard import NativeLogGuard
 
+native_path=Path(__file__).resolve().parents[1]/'tools/zr/native_log_guard.py'
+spec=importlib.util.spec_from_file_location('zr_native_log_guard',native_path)
+zr_native_log_guard=importlib.util.module_from_spec(spec)
+sys.modules[spec.name]=zr_native_log_guard
+spec.loader.exec_module(zr_native_log_guard)
+
 class LogGuardTests(unittest.TestCase):
+    module=native_log_guard
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.path=Path(self.temp.name)/'qemu-stderr.log';self.path.write_bytes(b'')
-        self.guard=NativeLogGuard(self.path);self.addCleanup(self.guard.close)
+        self.guard=self.module.NativeLogGuard(self.path);self.addCleanup(self.guard.close)
 
     def append(self,data):
         with self.path.open('ab') as stream:stream.write(data)
@@ -36,7 +45,7 @@ class LogGuardTests(unittest.TestCase):
             def seek(self,offset):return original.seek(offset)
             def read(self,size):
                 original.read(size)
-                raise OSError(61,'No data available')
+                raise OSError(getattr(errno,'ENODATA',61),'No data available')
             def close(self):original.close()
         self.guard.reader=PartialFailure()
         self.assertTrue(self.guard.poll());self.assertEqual(self.guard.transient_retries,1)
@@ -44,8 +53,8 @@ class LogGuardTests(unittest.TestCase):
 
     def test_persistent_unavailability_is_not_success(self):
         self.append(b'not yet readable')
-        with patch.object(Path,'open',side_effect=OSError(61,'No data available')):
-            with patch('native_log_guard.time.monotonic',side_effect=[0,2]):
+        with patch.object(Path,'open',side_effect=OSError(getattr(errno,'ENODATA',61),'No data available')):
+            with patch.object(self.module.time,'monotonic',side_effect=[0,2]):
                 with self.assertRaises(OSError):self.guard.poll()
         self.assertEqual(self.guard.position,0)
 
@@ -75,5 +84,8 @@ class LogGuardTests(unittest.TestCase):
     def test_truncation_is_reported(self):
         self.append(b'long enough');self.assertFalse(self.guard.poll());self.path.write_bytes(b'')
         with self.assertRaises(RuntimeError):self.guard.poll()
+
+class ZRNativeLogGuardTests(LogGuardTests):
+    module=zr_native_log_guard
 
 if __name__=='__main__':unittest.main()

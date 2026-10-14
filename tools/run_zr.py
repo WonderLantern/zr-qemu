@@ -17,8 +17,13 @@ def main():
     p.add_argument('--raw',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--profile',choices=('preview','photo','main10','r3d'),default='preview')
+    p.add_argument('--audit',action='store_true',help='After photo capture, audit actual card and independently decode every RAW sample')
     p.add_argument('--seconds',type=int,choices=(10,20,30,60,90,180,360,600,900),help='Override the native profile observation duration')
     a=p.parse_args()
+    if a.audit:
+        if a.profile!='photo':p.error('--audit currently requires --profile photo')
+        try:import rawpy
+        except ImportError:p.error('Install requirements-capture.txt before an audited photo workflow')
     if os.name=='nt' or os.environ.get('WSL_DISTRO_NAME')=='ubuntu-noble':p.error('Use Linux or explicitly selected Nikon WSL')
     output=a.output.resolve()
     if output.exists():p.error('Use a fresh output directory')
@@ -45,6 +50,9 @@ def main():
     print('Experimental '+a.profile+' workflow; video start callbacks are not recording acceptance.',flush=True)
     completed=subprocess.run(argv,env=env)
     print('Private run output: '+str(output),flush=True)
+    if completed.returncode==0 and a.audit:
+        completed=subprocess.run([sys.executable,'-B',str(ROOT/'tools/audit_zr_capture.py'),
+            '--output',str(output)],env=env)
     raise SystemExit(completed.returncode)
 
 if __name__=='__main__':main()

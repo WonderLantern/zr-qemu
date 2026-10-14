@@ -72,30 +72,30 @@
   "status_peer_host_checks": 134,
   "latest_private_native_video": [
     {
-      "run": "zr-qemu-543-main10-frame-graph-whole",
-      "result_sha256": "2ffcf11077a0ed6aace531da8207791794f32d65a92fb430b6a32dde9c9b90b5",
-      "accepted": false,
-      "error": "AssertionError('bounded key sequence consumed by distinct original handlers')",
-      "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
-      "owned_stopped": true,
-      "codec_input_bytes": 0,
-      "codec_pictures": 0,
-      "complete_graph_records": 38782,
-      "graph_audit_sha256": "bd7b28a6b326f092ef49616c04863ecf8ae4c22b47ad0f94770d6935b9d66801",
-      "scope": "ZR native VIDEO workflow on shared146b; not a Z9 movie test"
-    },
-    {
-      "run": "zr-qemu-544-r3d-frame-graph-whole",
-      "result_sha256": "c7d57c9e2f950c083fda07f0b050a4a6806cd8bdde1e6ee3a395a6e4b72ee26a",
-      "accepted": false,
+      "run": "zr-qemu-545-r3d-graph-waits-whole",
+      "result_sha256": "77e03a8f42bad85b3577053132739ad122d0c9233052f88183d4d4b4252e1d2c",
       "error": "TimeoutError('Original VIDEO dispatch did not settle to 0 after input state82')",
       "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
+      "accepted": false,
       "owned_stopped": true,
       "codec_input_bytes": 0,
       "codec_pictures": 0,
-      "complete_graph_records": 20862,
-      "graph_audit_sha256": "1d07ca5e0530960d169b96e9528d0131beb681fc1f79bdd5b17559f99a70dedf",
-      "scope": "ZR native VIDEO workflow on shared146b; not a Z9 movie test"
+      "complete_graph_records": 22134,
+      "wait_audit_sha256": "fc432882f2ed55c5ed50a506fdae40c9e39ad18f18fdc98b028165c95760a879",
+      "scope": "ZR native VIDEO on unchanged shared146b; actual wait/post operands, not Z9 movie acceptance"
+    },
+    {
+      "run": "zr-qemu-546-main10-graph-waits-whole",
+      "result_sha256": "d2e30be2f561e73f6135a405037c69c1083e38568a844b2618157321047d2d8e",
+      "error": "AssertionError('bounded key sequence consumed by distinct original handlers')",
+      "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
+      "accepted": false,
+      "owned_stopped": true,
+      "codec_input_bytes": 0,
+      "codec_pictures": 0,
+      "complete_graph_records": 49995,
+      "wait_audit_sha256": "9bf57efc6985b8b7044b36a86828dcf1c8e930988d9f76a541279d8f5be88311",
+      "scope": "ZR native VIDEO on unchanged shared146b; actual wait/post operands, not Z9 movie acceptance"
     }
   ],
   "previous_shared138_public_validation": {
@@ -168,7 +168,7 @@
   "public_validation": {
     "passed": true,
     "binary_sha256": "e2946a488e90cb7fc022acb575c81ea8fb5acdd9c2ad5ac54e0e544791966c2f",
-    "firmware_free_python_tests": 25,
+    "firmware_free_python_tests": 33,
     "c_pixel_checks_passed": true,
     "firmware_free_realizations": 4,
     "video_option_checks": 96,
@@ -181,7 +181,7 @@
     "lifecycle_profile_validated": true,
     "lifecycle_plugin_compiled_with_werror": true,
     "build_completed": true,
-    "full_native_photo_port_requalified": false,
+    "full_native_photo_port_requalified": true,
     "full_native_movie_port_requalified": false,
     "previous_python_tests_before_log_guard_fix": 16
   },
@@ -240,5 +240,68 @@
     "jpeg_completed_dumps": 0,
     "all_contacts_consumed": false,
     "scope": "Current public ZR photo recipe failed before independently audited files; historical private ZR acceptance is separate"
-  }
+  },
+  "previous_shared146_graph_video": [
+    {
+      "run": "zr-qemu-543-main10-frame-graph-whole",
+      "result_sha256": "2ffcf11077a0ed6aace531da8207791794f32d65a92fb430b6a32dde9c9b90b5",
+      "accepted": false,
+      "error": "AssertionError('bounded key sequence consumed by distinct original handlers')",
+      "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
+      "owned_stopped": true,
+      "codec_input_bytes": 0,
+      "codec_pictures": 0,
+      "complete_graph_records": 38782,
+      "graph_audit_sha256": "bd7b28a6b326f092ef49616c04863ecf8ae4c22b47ad0f94770d6935b9d66801",
+      "scope": "ZR native VIDEO workflow on shared146b; not a Z9 movie test"
+    },
+    {
+      "run": "zr-qemu-544-r3d-frame-graph-whole",
+      "result_sha256": "c7d57c9e2f950c083fda07f0b050a4a6806cd8bdde1e6ee3a395a6e4b72ee26a",
+      "accepted": false,
+      "error": "TimeoutError('Original VIDEO dispatch did not settle to 0 after input state82')",
+      "private_build_sha256": "8ef3932303e8e09daaa80a5605008b31b5938a10772d965bd8dd2c32ebb539cf",
+      "owned_stopped": true,
+      "codec_input_bytes": 0,
+      "codec_pictures": 0,
+      "complete_graph_records": 20862,
+      "graph_audit_sha256": "1d07ca5e0530960d169b96e9528d0131beb681fc1f79bdd5b17559f99a70dedf",
+      "scope": "ZR native VIDEO workflow on shared146b; not a Z9 movie test"
+    }
+  ],
+  "public_python_validation_platforms": [
+    "Windows Python",
+    "ubuntu-noble-nikon Python"
+  ],
+  "public_photo_acceptance": {
+    "updated_utc": "2026-10-14T03:08:14.710857+00:00",
+    "run": "zr-public-shared146-repeated-raw-whole2",
+    "binary_sha256": "e2946a488e90cb7fc022acb575c81ea8fb5acdd9c2ad5ac54e0e544791966c2f",
+    "native_result_sha256": "d0d529a21f85e9d63ade67127ae0939eaecbd0a5056007e959187fd0f91ed47d",
+    "independent_audit_sha256": "1e0bf1c01967e399b4fb988b0a8dc93be2b805010b59832c2e4e59d4be405374",
+    "audit_wrapper_sha256": "565acf5d338e92ccb2e82d55b7de2a272f3d532e81e4153bc36d402f6133176b",
+    "host_guard_sha256": "e8718bd96f61e1a49dfa56558972507f8b17ccf89caa9e7f3a5a202a32649787",
+    "card_audit_sha256": "cbb2c4ce82d4e67fa221462d432a93dfffb155bdb783f5de635a8f7c04339201",
+    "photos": 2,
+    "raw_size": [
+      6064,
+      4040
+    ],
+    "bits": 14,
+    "all_raw_samples": 48997120,
+    "rawpy": "0.27.1",
+    "libraw": [
+      0,
+      22,
+      1
+    ],
+    "full_native_photo_port_requalified": true,
+    "burst_verified": false,
+    "raw_precapture_verified": false,
+    "native_movies_accepted": false,
+    "original_algorithms_accepted": false,
+    "scope": "Current public ZR binary/portable photo runner: two original firmware-written full F0 NEFs, all samples/previews, same guest/card and per-photo fresh live view/menu recovery. Earlier failed attempt retained; no timing causality, indefinite stability, physical camera or original Nikon algorithm claim"
+  },
+  "native_zr_log_guard_export_fixed": true,
+  "portable_zr_photo_file_audit": true
 }

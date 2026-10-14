@@ -11,8 +11,10 @@ Users provide their own compatible inputs locally. See NOTICE.md.
 **This is a development snapshot. Camera H.265 Main10 and R3D recording are
 not accepted or playable.** Original menus, landscape LCD, functional Bayer
 live view, full-resolution photo transport and the functional lossless14 NEF
-path have native research evidence. Latest new options have bounded device
-tests; the portable launcher has its own validation limits. See the detailed
+path have native research evidence. The current portable photo launcher passed two full 6064 x 4040,
+14-bit NEFs, every one of 48,997,120 RAW samples, per-photo previews,
+fresh live view and menu recovery in the same stopped session/card.
+Other new options retain their bounded verification limits. See the detailed
 [snapshot evidence and outstanding work](docs/development-snapshot.md).
 
 ## Build and run
@@ -70,3 +72,16 @@ Original ISP/DSP/H.265/RAW/JPEG, real lens/AF/PDAF, pre-capture/burst stability,
 physical timing, full NeuPro specification and neural inference remain open.
 
 当前 shared146 的共享输入/所有权模型、整轮录像失败结果及复用更正见 [shared146 notes](docs/shared146.md)。H.265／R3D 录像和原机算法仍未验收。
+
+
+For an independently audited photo workflow, install optional decoding
+dependencies and use the same launcher with `--profile photo --audit`:
+
+```sh
+python -m pip install -r requirements-capture.txt
+python tools/run_zr.py --firmware /absolute/path/to/zr-main-payload.bin \
+    --resources /absolute/path/to/private/captures --raw .local/zr-14bit.raw \
+    --output "$HOME/wonderlantern-zr-runs/photo-001" --profile photo --audit
+```
+
+The result covers released repeated photos, not continuous burst or movies.

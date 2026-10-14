@@ -2,6 +2,7 @@
 """Firmware-free input, completion and storage ownership regressions."""
 import json
 import importlib
+import os
 from pathlib import Path
 import struct
 import sys
@@ -59,7 +60,8 @@ class CaptureContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d)/'capture-card.raw'
             path.write_bytes(b'existing user data')
-            with self.assertRaises(FileExistsError):
+            expected=ValueError if os.name=='nt' or os.environ.get('WSL_DISTRO_NAME')=='ubuntu-noble' else FileExistsError
+            with self.assertRaises(expected):
                 create(path, 'blank')
             self.assertEqual(path.read_bytes(), b'existing user data')
 
