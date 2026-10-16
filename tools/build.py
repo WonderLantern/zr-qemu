@@ -12,8 +12,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = '10.2.4'
 SHA256 = '821b545b92f165e57dddccac5077d76d4d436a226595b8813ad59306bbfd0746'
-SOURCES = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT/'qemu').iterdir() if p.suffix in ('.c','.h','.py','.patch'))
-
+SOURCES = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT/'qemu').rglob('*') if p.is_file() and '__pycache__' not in p.parts)
 
 def digest(path):
     h = hashlib.sha256()
@@ -52,14 +51,16 @@ def main():
                 return None
         with tarfile.open(archive,'r:xz') as t: t.extractall(work,filter=source_filter)
         marker.write_text(SHA256+'\n')
-    subprocess.run(['python3',str(ROOT/'qemu/prepare_source.py'),str(source)],check=True)
+    from build_he_codec import build as build_he_codec
+    he_codec=build_he_codec(work)
+    subprocess.run(['python3','-B',str(ROOT/'qemu/prepare_source.py'),str(source),'--he-library',he_codec['library']],check=True)
     build = work/'build'
     build.mkdir(exist_ok=True)
     options = ['--target-list=aarch64-softmmu','--without-default-devices','--disable-docs','--disable-tools','--disable-user','--disable-werror','--disable-gtk','--disable-sdl','--disable-vnc','--disable-opengl','--disable-guest-agent','--disable-slirp','--disable-rust','--disable-debug-info']
     if not (build/'build.ninja').exists(): subprocess.run([str(source/'configure'),*options],cwd=build,check=True)
     subprocess.run(['ninja','-j',str(a.jobs),'qemu-system-aarch64'],cwd=build,check=True)
     binary = build/'qemu-system-aarch64'
-    manifest = dict(qemu_version=VERSION,upstream_archive_sha256=SHA256,binary=str(binary),binary_sha256=digest(binary),sources={name:digest(ROOT/name) for name in SOURCES},configure=options,
+    manifest = dict(qemu_version=VERSION,upstream_archive_sha256=SHA256,binary=str(binary),binary_sha256=digest(binary),sources={name:digest(ROOT/name) for name in SOURCES},configure=options,he_codec_dependency=he_codec,
         compiled_sources={p.name:digest(p) for p in (source/'hw/arm').glob('nikon-*') if p.suffix in ('.c','.h')},
         compiled_upstream={name:digest(source/name) for name in ('hw/arm/Kconfig','hw/arm/meson.build','hw/pci-host/designware.c')})
     destination = ROOT/'.local/build-manifest.json'

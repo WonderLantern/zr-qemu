@@ -1,0 +1,104 @@
+{
+  "firmware_sha256": "9ac53c082e1d7cc841c458465c08bb49223b36cf9d381b8206076751d7b42c8f",
+  "points": {
+    "app_video_started_callback": "0x40f72f2c",
+    "native_video_start_enter": "0x411a1ce0",
+    "native_video_stop_enter": "0x411a1e70",
+    "native_video_start_failure_cleanup": "0x411a9cd8",
+    "native_video_stop_finish": "0x411b0f40",
+    "app_video_stopped_callback": "0x40f72f80",
+    "app_video_stop_reason_40f720f8": "0x40f720f8",
+    "app_video_stop_reason_40f725f0": "0x40f725f0",
+    "app_video_stop_reason_40f734b4": "0x40f734b4",
+    "app_video_stop_reason_40f73f7c": "0x40f73f7c",
+    "app_video_request_message": "0x40f72c9c",
+    "app_video_request_stop_dispatch": "0x40f72d2c",
+    "native_mux_fatal_40f1b278": "0x40f1b278",
+    "native_mux_fatal_40f1bad0": "0x40f1bad0",
+    "native_mux_fatal_40f1bda0": "0x40f1bda0",
+    "native_mux_fatal_40f1c158": "0x40f1c158",
+    "native_mux_fatal_40f1c210": "0x40f1c210",
+    "native_mux_fatal_40f1cf30": "0x40f1cf30",
+    "native_mux_fatal_40f1dc34": "0x40f1dc34",
+    "native_mux_fatal_40f1dce0": "0x40f1dce0",
+    "native_mux_fatal_40f1ddb0": "0x40f1ddb0",
+    "native_mux_fatal_40f1de7c": "0x40f1de7c",
+    "native_record_launch": "0x411bd4a0",
+    "native_record_launch_result": "0x411bd500",
+    "native_image_mode_dispatch": "0x4116e9f8",
+    "native_image_mode_branch": "0x4116ea3c",
+    "native_image_ready_client_start": "0x4115b010",
+    "native_image_close_result": "0x4116ea8c",
+    "native_encoder_open_result": "0x402ff754",
+    "native_encoder_configure_result": "0x402ff7b0",
+    "native_encoder_header_result": "0x402ff7f4",
+    "native_encoder_header_copy": "0x402ff950",
+    "native_codec_error": "0x40eac7f0",
+    "native_encoder_open_enter": "0x40e32fc4",
+    "native_encoder_configure_enter": "0x40e333f0",
+    "native_encoder_header_wait_result": "0x40e386bc",
+    "native_encoder_worker_header": "0x40e3c810",
+    "native_vdi_create": "0x40e57cb8",
+    "native_vdi_headers": "0x40e59dac",
+    "native_encoder_worker_header_dispatch": "0x40e3c708",
+    "native_vdi_initialize_return": "0x40e34ae4",
+    "native_codec_allocate_return": "0x402fdd14",
+    "native_codec_boot_result": "0x40e32d68",
+    "native_vdi_core_pc_query": "0x40e53c60"
+  },
+  "memory": {
+    "codec_driver_state": {
+      "address": "0xa02efa4f0",
+      "bytes": 320
+    },
+    "codec_worker_state": {
+      "address": "0xa02efcb00",
+      "bytes": 160
+    },
+    "codec_user_config": {
+      "address": "0xa03069588",
+      "bytes": 720
+    },
+    "codec_header_lengths": {
+      "address": "0xa030698a0",
+      "bytes": 32
+    },
+    "argument1": {
+      "register": 1,
+      "bytes": 560
+    },
+    "stack": {
+      "register": 31,
+      "bytes": 512
+    },
+    "image_mode": {
+      "address": "0xa03e38380",
+      "bytes": 64
+    }
+  },
+  "maximum_records": 32768,
+  "scope": "Read-only original codec reopen, configuration and header return tracing after native638 exception. Does not modify guest or device.",
+  "provenance": {
+    "zr-video-native-output-bank-bindings.json": "a5beb41830334f187df89378382f7169adcc2e16bae435e090a4a9c5c5890fe4",
+    "zr-video-native-recording-bank-bindings.json": "e943337269449c69f35e8900d414a445c7ce118d7e7e39354d2360cc0342f578",
+    "zr-video-native-recording-reason-bindings.json": "202b051c42a7643028b2e9ff27a8d8a750eade4c3ec210574024cd3949487b24",
+    "zr-video-pcm-supplier-bindings.json": "903948d873a67d90a0efed389e71d49d82cd5210eb24fff3cf998c0b75124405",
+    "zr-video-pcm-handoff-bindings.json": "90162aaaac570ae01527f45ac65db90e8a176a058d3a6a956095d44a3aaaa4ab",
+    "zr-video-pcm-supplier-handoff-bindings.json": "4e33c23436df659e665bd9cb6a34bea43e8ba665e62c03b3c6734035e01b1760",
+    "zr-video-pcm-completion-bindings.json": "389f7d4ab97c29cb806164129751e79a2c8f46f67c88bfe8324ad61b900e0701",
+    "zr-video-pcm-conversion-bindings.json": "7f77e853c904a98fddf2b7102344484db561ee32fd5a41e67912f4389ac66bd4",
+    "zr-video-audio-mux-bindings.json": "36ea0bfe3866ffccb70950cc5c3ef852c272e7aee498ded0ea251b8ffcc75a9a",
+    "zr-video-restart-bindings.json": "8976b6cfa2855cae33a0459aa0589e6a07778ff08fbc42f5df227352bb611a66",
+    "zr-video-restart-handoff-bindings.json": "85e750854161ea317edf0f5b5029b7426b86548b02948dacdafe2191bbfa0f21",
+    "zr-video-restart-readiness-bindings.json": "e8ddc5fbb08f208e63e19533ed3a222800fbf3a593f43f8f8eae93561a9a3fb6"
+  },
+  "flush_points": [
+    "native_codec_error",
+    "native_encoder_open_result",
+    "native_encoder_configure_result",
+    "native_encoder_header_result",
+    "app_video_started_callback",
+    "app_video_stopped_callback",
+    "native_vdi_initialize_return"
+  ]
+}

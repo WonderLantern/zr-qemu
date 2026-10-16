@@ -7,11 +7,16 @@ import subprocess
 
 p = argparse.ArgumentParser()
 p.add_argument('source', type=Path)
+p.add_argument('--he-library',type=Path,required=True)
 a = p.parse_args()
 root = a.source.resolve()
 if root.name != 'qemu-10.2.4' or not (root/'.wonderlantern-extracted').is_file():
     p.error('expected the verified upstream tree created by tools/build.py')
 here = Path(__file__).resolve().parent
+
+def write_changed(path,body):
+    if not path.exists() or path.read_text()!=body:path.write_text(body)
+
 # Refuse an unexpected or partially patched CPU tree. A reverse dry run
 # verifies an already applied patch; repeat builds must not silently skip it.
 patch = here / 'arm-service-events.patch'
@@ -32,7 +37,8 @@ elif subprocess.run(command + ['--reverse', '--dry-run'], cwd=root,
     raise SystemExit('Unexpected DesignWare source: DMA patch cannot be verified')
 for overlay in here.glob('nikon-*'):
     if overlay.suffix in ('.c', '.h'):
-        shutil.copyfile(overlay, root / 'hw/arm' / overlay.name)
+        target=root/'hw/arm'/overlay.name
+        if not target.exists() or target.read_bytes()!=overlay.read_bytes():shutil.copyfile(overlay,target)
 for filename, marker, addition in [
     ('hw/arm/Kconfig', 'config NIKON_Z9_LAB',
      '\nconfig NIKON_Z9_LAB\n    bool\n    depends on AARCH64\n    select ARM_GIC\n    select PCI_EXPRESS_DESIGNWARE\n    select NVME_PCI\n    select SPDM_SOCKET\n'),
@@ -48,24 +54,24 @@ for filename, marker, addition in [
     path = root / filename
     body = path.read_text()
     if marker not in body:
-        path.write_text(body + addition)
+        write_changed(path, body + addition)
 path = root / 'hw/arm/Kconfig'
 body = path.read_text()
 block = body[body.index('config NIKON_Z9_LAB'):]
 if '    select PCI_EXPRESS_DESIGNWARE' not in block.split('\nconfig ', 1)[0]:
     body = body.replace('config NIKON_Z9_LAB\n',
                         'config NIKON_Z9_LAB\n    select PCI_EXPRESS_DESIGNWARE\n    select NVME_PCI\n    select SPDM_SOCKET\n', 1)
-    path.write_text(body)
+    write_changed(path, body)
 path = root / 'hw/arm/meson.build'
 body = path.read_text()
 line = "arm_ss.add(when: 'CONFIG_NIKON_Z9_LAB', if_true: files('nikon-z9-lab.c'))\n"
 if line not in body:
     body = body.replace("hw_arch += {'arm': arm_ss}", line + "hw_arch += {'arm': arm_ss}")
-    path.write_text(body)
+    write_changed(path, body)
 jpeg_line = "arm_ss.add(when: 'CONFIG_NIKON_Z9_LAB', if_true: dependency('libjpeg', required: true))\n"
 body = path.read_text()
 if jpeg_line not in body:
-    path.write_text(body.replace("hw_arch += {'arm': arm_ss}",
+    write_changed(path, body.replace("hw_arch += {'arm': arm_ss}",
                                  jpeg_line + "hw_arch += {'arm': arm_ss}"))
 
 # Both model repositories use the same EXPEED7 source implementation.
@@ -78,7 +84,20 @@ for line in (
 ):
     if line not in body:
         body = body.replace("hw_arch += {'arm': arm_ss}", line + "hw_arch += {'arm': arm_ss}")
-path.write_text(body)
+write_changed(path, body)
+
+# Authored functional HE C++ bridge; no firmware or vendor SDK linked.
+library=a.he_library.resolve()
+if not library.is_file() or library.read_bytes()[:8]!=b'!<arch>\n':
+    raise SystemExit('Build the declared HE archive with tools/build.py first')
+path=root/'hw/arm/meson.build';body=path.read_text()
+begin='# WONDERLANTERN_HE_CODEC_BEGIN\n';end='# WONDERLANTERN_HE_CODEC_END\n'
+quoted="'"+str(library).replace('\\','\\\\').replace("'","\\'")+"'"
+block=begin+"arm_ss.add(when: 'CONFIG_NIKON_Z9_LAB', if_true: declare_dependency(link_args: ["+quoted+", '-lstdc++']))\n"+end
+if begin in body:
+    first=body.index(begin);last=body.index(end,first)+len(end);body=body[:first]+block+body[last:]
+else:body=body.replace("hw_arch += {'arm': arm_ss}",block+"hw_arch += {'arm': arm_ss}")
+write_changed(path, body)
 
 # QEMU's TCG GDB removal currently stops at the first CPU without a matching
 # breakpoint. A global SMP breakpoint can be absent on one vCPU after a hit,
@@ -116,4 +135,4 @@ new = '\n'.join([
 if new not in body:
     if body.count(old) != 1:
         raise SystemExit('unexpected TCG breakpoint-removal implementation')
-    path.write_text(body.replace(old, new, 1))
+    write_changed(path, body.replace(old, new, 1))

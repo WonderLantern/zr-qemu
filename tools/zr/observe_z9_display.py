@@ -62,7 +62,11 @@ class Observer:
 def capture_console(g, label):
     file = g.out/(label+'.ppm')
     before = json.loads(g.qmp.command('qom-get', path='/machine', property='engine1548-scanout-state'))
-    g.qmp.command('screendump', filename=str(file))
+    staged=g.runtime/(file.name+'.capture')
+    if staged.exists():raise ValueError('Preserve previous native screen capture')
+    g.qmp.command('screendump', filename=str(staged))
+    from host_capture_file import publish
+    publish(g,staged,file)
     after = json.loads(g.qmp.command('qom-get', path='/machine', property='engine1548-scanout-state'))
     if before != after:
         raise ValueError('host screenshot changed the paused display state')

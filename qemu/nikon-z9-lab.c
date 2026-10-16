@@ -43,6 +43,12 @@
 #define Z9_PATH_MAX_EDGES 32768u
 OBJECT_DECLARE_SIMPLE_TYPE(NikonZ9State, NIKON_Z9_LAB)
 
+typedef struct WlRawPacketRecord {
+    bool owned;
+    uint64_t address, epoch;
+    uint32_t capacity, width, height, descriptor_slot;
+} WlRawPacketRecord;
+
 typedef struct Z9MultiCounter {
     NikonZ9State *owner;
     QEMUTimer *timer;
@@ -73,12 +79,42 @@ static const struct {
  * observed 512-byte gap unmapped. RAM is demand-backed, never prefilled with
  * scene pixels, and produces no readiness or image-completion event.
  * Evidence: ../evidence/z9-image-bank-149-profile.json. */
-static const struct {
+typedef struct ImageBankRange {
     hwaddr base, end;
-} image_bank_ranges[] = {
+} ImageBankRange;
+static const ImageBankRange image_bank_ranges[] = {
     { UINT64_C(0x840000000), UINT64_C(0x8adf8da00) },
     { UINT64_C(0x8adf8dc00), UINT64_C(0x8fff47400) },
 };
+
+/* Native ZR614/615 submits 0x8ad298400 + 42920960 bytes. This
+ * full RAW allocation crosses the 512-byte hole in the Z9 C5.32 pool union.
+ * ZR uses the union with that observed span; Z9 keeps its original topology.
+ * This is bounded software backing, not a physical DRAM capacity claim. */
+static const ImageBankRange zr_image_bank_ranges[] = {
+    { UINT64_C(0x840000000), UINT64_C(0x8fff47400) },
+};
+
+static const ImageBankRange *image_bank_layout(Object *obj, unsigned *count)
+{
+    if (object_dynamic_cast(obj, MACHINE_TYPE_NAME("nikon-zr-lab"))) {
+        *count = ARRAY_SIZE(zr_image_bank_ranges);
+        return zr_image_bank_ranges;
+    }
+    *count = ARRAY_SIZE(image_bank_ranges);
+    return image_bank_ranges;
+}
+
+static uint64_t image_bank_bytes(Object *obj)
+{
+    unsigned count;
+    const ImageBankRange *ranges = image_bank_layout(obj, &count);
+    uint64_t bytes = 0;
+    for (unsigned i = 0; i < count; i++) {
+        bytes += ranges[i].end - ranges[i].base;
+    }
+    return bytes;
+}
 
 /* External clock fixture: complete 16-bit words, not pin-level SPI timing. */
 typedef struct Z9SerialTransfer {
@@ -174,12 +210,22 @@ typedef struct Z9Engine1518 {
     uint64_t stream_frames, stream_acks, stream_cancelled;
 } Z9Engine1518;
 
+typedef struct Ex7OwnedRaw {
+    uint64_t address, bytes, frame, hash;
+    uint32_t geometry, pitch;
+    bool acknowledged;
+} Ex7OwnedRaw;
+
 typedef struct Ex7RawTransport {
     qemu_irq frame_irq;
     uint32_t frame_pending, frame_result_bytes;
     uint64_t frame_jobs, frame_bytes, frame_frame;
+    uint64_t conversion_jobs, conversion_bytes;
+    bool last_conversion;
     uint64_t frame_source, frame_target;
     uint64_t frame_hash, frame_readback, frame_acks;
+    uint64_t frame_input_hash, reencode_jobs;
+    uint32_t reprogram_fields;
     uint32_t interface, subscription;
     uint64_t control_writes, empty_w1cs;
     uint32_t parameters[0x42c / 4];
@@ -194,6 +240,12 @@ typedef struct Ex7JPEGPort {
     bool result_valid;
     uint64_t bytes, capacity, jobs, acks, core_acks;
 } Ex7JPEGPort;
+
+typedef struct Ex7CaptureSurface {
+    bool valid, committed, thumbnail_used;
+    unsigned kind, output, width, height, stride;
+    uint64_t generation, serial, y, uv, count_passes, commits;
+} Ex7CaptureSurface;
 
 struct NikonZ9State {
     MachineState parent;
@@ -294,6 +346,12 @@ struct NikonZ9State {
     Z9SerialPIO serial_pio[11];
     qemu_irq serial_irq[11];
     char *serial_last_tx;
+    bool serial8_write_peer_enabled;
+    QEMUTimer *serial8_write_peer_timer;
+    uint64_t serial8_write_peer_descriptor, serial8_write_peer_limit;
+    uint64_t serial8_write_peer_words, serial8_write_peer_batches;
+    const char *serial8_write_peer_fault;
+    GChecksum *serial8_write_peer_source_hash, *serial8_write_peer_wire_hash;
     bool serial_write_peer_enabled;
     bool audio_register_retention;
     GHashTable *audio_register_map;
@@ -331,6 +389,8 @@ struct NikonZ9State {
     bool serial5_audio_sample_enabled[5];
     uint32_t serial5_audio_samples[5][4];
     uint64_t serial5_audio_sample_updates, serial5_audio_sample_reads;
+    unsigned serial5_pcm_phase[5];
+    uint64_t serial5_pcm_blocks[5], serial5_pcm_words[5], serial5_pcm_irqs[5];
     qemu_irq clock_irq;
     uint32_t engine_config[3];
     uint32_t engine_hold[2], engine_bank[2];
@@ -388,6 +448,10 @@ struct NikonZ9State {
     uint32_t engine151_green_means[2];
     uint64_t engine151_green_samples, engine151_capture_cancels;
     bool engine151_capture_pixels_model, engine151_capture_pending;
+    bool engine151_capture_waiting, engine151_capture_wait_failed;
+    unsigned engine151_capture_wait_bank;
+    uint64_t engine151_capture_wait_after, engine151_capture_wait_requests;
+    uint64_t engine151_capture_wait_completions, engine151_capture_wait_cancels;
     uint64_t engine151_capture_jobs, engine151_capture_bytes, engine151_capture_acks;
     uint64_t engine151_capture_consumed_frame, engine151_capture_source;
     uint64_t engine151_capture_y, engine151_capture_uv;
@@ -395,6 +459,8 @@ struct NikonZ9State {
     bool engine151_control_model;
     bool engine151_raw_output_model;
     uint64_t engine151_raw_output_jobs, engine151_raw_output_bytes, engine151_raw_output_target, engine151_raw_output_source, engine151_raw_output_frame;
+    Ex7OwnedRaw engine151_owned_raw[64];
+    unsigned engine151_owned_raw_cursor;
     bool engine151_active[2];
     qemu_irq engine151_irq[2];
     uint64_t engine151_drains[2], engine151_drain_acks[2];
@@ -402,6 +468,10 @@ struct NikonZ9State {
     uint64_t engine151_starts[2], engine151_stops[2];
     uint64_t engine151_parameter_valid[2];
     uint32_t engine1542_config[40][0x1000 / 4];
+    bool capture_frame_pool_model;
+    Ex7CaptureSurface capture_surfaces[64];
+    uint64_t capture_pool_productions;
+    int capture_thumbnail_pool_source;
     bool capture_nv16_model, capture_nv16_requested, capture_nv16_failed;
     uint64_t capture_nv16_requests, capture_nv16_jobs, capture_nv16_bytes;
     uint64_t capture_nv16_input_bytes, capture_nv16_cancels, capture_nv16_consumed151;
@@ -409,6 +479,13 @@ struct NikonZ9State {
     uint32_t capture_nv16_w[3], capture_nv16_h[3], capture_nv16_stride[3];
     uint32_t capture_nv16_source[0x220 / 4], capture_nv16_output[3][0x100 / 4];
     uint32_t capture_nv16_geometry[3][0x40 / 4];
+    bool video_preview_model;
+    uint64_t video_preview_y[3], video_preview_uv[3], video_preview_jpeg_consumed[3];
+    uint32_t video_preview_w[3], video_preview_h[3], video_preview_pitch[3], video_preview_sub[3];
+    uint64_t capture_thumbnail_consumed_video;
+    unsigned capture_thumbnail_source_sub;
+    uint32_t video_preview_written[7];
+    uint64_t video_preview_jobs, video_preview_input_bytes, video_preview_output_bytes;
     bool capture_thumbnail_model, capture_thumbnail_failed;
     uint64_t capture_thumbnail_requests, capture_thumbnail_jobs, capture_thumbnail_bytes;
     uint64_t capture_thumbnail_input_bytes, capture_thumbnail_consumed_nv16;
@@ -421,18 +498,31 @@ struct NikonZ9State {
     uint32_t engine1542_pending[40];
     uint64_t engine1542_acks[40];
     bool raw_pipeline_model;
+    uint32_t raw_histogram[3][256];
+    uint64_t raw_histogram_frames, raw_histogram_samples;
+    unsigned raw_histogram_source;
+    bool raw_histogram_luma;
     bool video_yuv_output_events_model;
     bool video_source_end_model;
     bool video_secondary_isp_model;
     uint64_t video_secondary_isp_frames;
     bool video_secondary_sensor_model, video_secondary_sensor_ready;
+    bool video_secondary_parallel_model;
+    bool video_source_ram_model;
+    uint64_t video_source_ram_epoch, video_source_ram_jobs, video_source_ram_bytes;
+    uint64_t video_source_ram_rejects, video_source_ram_y, video_source_ram_uv, video_source_ram_rgb;
+    unsigned video_source_ram_row, video_source_ram_width, video_source_ram_height;
+    unsigned video_source_ram_pitch, video_source_ram_rgb_pitch;
+    uint64_t video_secondary_parallel_epoch;
     NikonRawPixels *video_secondary_sensor_pixels;
     char *video_secondary_sensor_sha256;
     uint64_t video_secondary_sensor_epoch, video_secondary_sensor_consumed;
     uint64_t video_secondary_sensor_bytes, video_secondary_sensor_cancels;
     bool video_secondary_source_end_model;
     bool video_receiver_before_supplier_model;
-    bool video_primary_boundaries_model;
+    bool video_primary_boundaries_model, video_primary_input_boundary_model;
+    uint64_t video_primary_input_epoch, video_primary_input_frames;
+    uint64_t video_primary_decoded_input_epoch, video_primary_sensor_input_epoch;
     bool engine151_active_program_model;
     uint64_t engine151_latched_parameter_valid[2];
     uint32_t video_primary_boundaries_pending;
@@ -453,6 +543,11 @@ struct NikonZ9State {
     QEMUTimer *raw_pipeline_timer;
     qemu_irq engine1542_irq;
     uint64_t raw_pipeline_frames, raw_pipeline_bytes, raw_pipeline_rejects;
+    uint64_t raw_admission_ticks, raw_admission_changes, raw_admission_counts[32];
+    struct {
+        uint64_t time_ns, frames, epoch;
+        uint32_t blocked, route, row;
+    } raw_admission_history[128];
     bool engine151_video_stream_model;
     bool video_peripheral_control_model, video_peripheral_pending;
     bool wave5_model, wave5_busy, wave5_lossless_requested, wave5_realized;
@@ -460,6 +555,17 @@ struct NikonZ9State {
     uint32_t wave5_irq_number;
     struct WlWave5State *wave5;
     bool video_raw_transport_model, video_raw_packet_owned, video_raw_frame_ready, video_raw_ring_latched;
+    bool video_raw_packet_ring_model, video_raw_receiver_banks_model;
+    bool video_raw_he_codec_model;
+    bool video_raw_receiver_wait_bank;
+    uint16_t video_raw_receiver_fresh;
+    unsigned video_raw_receiver_bank;
+    WlRawPacketRecord video_raw_packets[64];
+    WlRawPacketRecord *video_raw_packet_extra;
+    unsigned video_raw_packet_extra_count;
+    uint64_t video_raw_ring_full_waits, video_raw_receiver_refills;
+    uint64_t video_raw_receiver_latches, video_raw_reposted_packets;
+
     bool task1500_global_pulse_model;
     uint32_t task1500_global_pulse[3];
     uint64_t task1500_global_pulse_asserts[3], task1500_global_pulse_releases[3];
@@ -478,6 +584,7 @@ struct NikonZ9State {
     uint64_t video_nr_reset_asserts[2], video_nr_reset_releases[2];
     bool video_backend_drain_model;
     bool video_backend_drain_requested[2], video_backend_drain_done[2];
+    bool video_backend_locally_disabled[2];
     uint64_t video_backend_drain_requests[2], video_backend_drain_events[2], video_backend_drain_acks[2];
     bool video_backend_reject_valid, video_backend_reject_descriptor, video_backend_reject_active;
     bool video_backend_reject_owned, video_backend_reject_requested, video_backend_reject_done;
@@ -493,8 +600,18 @@ struct NikonZ9State {
     uint64_t video_raw_encode_jobs, video_raw_decode_jobs, video_raw_encode_rejects, video_raw_decode_rejects;
     uint64_t video_raw_internal_bytes, video_raw_packet_bytes, video_raw_decoded_bytes, video_raw_packet_address;
     uint32_t video_raw_width, video_raw_height, video_raw_pitch, video_raw_crc, video_raw_packet_row;
+    bool video_raw_queued_input_model;
+    uint32_t video_raw_source_width, video_raw_source_height, video_raw_crop_x, video_raw_crop_y;
+    uint32_t video_raw_receiver_left, video_raw_receiver_top, video_raw_receiver_mode;
+    uint64_t video_raw_input_events;
     uint32_t video_raw_compressed_bytes, video_raw_pixels_crc;
     uint8_t *video_raw_compressed;
+    uint8_t *video_raw_decoded_packet;
+    uint32_t video_raw_decoded_packet_bytes;
+    uint64_t video_raw_decode_cache_hits, video_raw_decompressions;
+    bool video_main_model;
+    struct WlMainOutputState *video_main;
+    uint16_t video_main_valid[2], video_main_written[2];
     bool raw_pipeline_cache_internal[3];
     NikonRawPixels *video_raw_pixels;
     QEMUTimer *video_raw_timer;
@@ -527,6 +644,9 @@ struct NikonZ9State {
     uint32_t engine151_hold[2], engine151_reset_flags[2], engine151_pending[2];
     uint64_t engine151_empty_stops[2], engine151_initializations[2];
     uint32_t engine_pair_init[2][3];
+    bool engine1540_waiting[2], engine1540_wait_failed[2];
+    uint64_t engine1540_wait_after[2], engine1540_wait_requests[2];
+    uint64_t engine1540_wait_completions[2], engine1540_wait_cancels[2];
     uint32_t engine_1504_init[0x804 / 4];
     uint32_t task_1500_desc[32][0x50 / 4];
     uint32_t task_1500_selector[56];
@@ -585,7 +705,7 @@ struct NikonZ9State {
     bool primary_d980_prepared_start_model, primary_d980_prepared;
     uint64_t primary_d980_prepare_requests, primary_d980_prepared_starts, primary_d980_prepare_cancelled;
     bool engine15e2_preflight_model, engine15e2_last_count_only;
-    uint64_t engine15e2_count_consumed[4], engine15e2_count_jobs, engine15e2_thumbnail_consumed;
+    uint64_t engine15e2_count_consumed[7], engine15e2_count_jobs, engine15e2_thumbnail_consumed;
     bool engine15e2_limit_disabled_model, engine15e2_result474_model;
     uint64_t engine15e2_limit_disabled_jobs;
     uint32_t engine15e2_encoded_width, engine15e2_encoded_height, engine15e2_encoded_scale;
@@ -597,6 +717,7 @@ struct NikonZ9State {
     unsigned engine15e2_active_bank;
     uint32_t engine15e2_jpeg_pending, engine15e2_jpeg_core;
     uint64_t engine15e2_jpeg_requests, engine15e2_jpeg_jobs, engine15e2_jpeg_bytes;
+    unsigned engine15e2_jpeg_chroma_divisor;
     uint64_t engine15e2_jpeg_input_bytes, engine15e2_jpeg_acks, engine15e2_jpeg_core_acks;
     uint64_t engine15e2_jpeg_consumed_job, engine15e2_jpeg_output, engine15e2_jpeg_last_bytes;
     uint64_t engine15e2_jpeg_y, engine15e2_jpeg_uv, engine15e2_jpeg_capacity;
@@ -607,6 +728,10 @@ struct NikonZ9State {
     bool engine153_inplace_identity_model;
     bool engine153_alternate_bank_model;
     uint64_t engine153_identity_hash;
+    bool engine153_deferred_input_model, engine153_waiting[2], engine153_wait_failed[2];
+    unsigned engine153_cancel_reset_stage[2];
+    uint64_t engine153_wait_after[2], engine153_wait_requests[2], engine153_wait_completions[2], engine153_wait_cancels[2];
+    uint8_t engine153_wait_descriptor[2][0x7c0];
     bool engine153_frame_pass_model;
     qemu_irq engine153_irq[2];
     uint32_t engine153_pending[2];
@@ -653,9 +778,12 @@ struct NikonZ9State {
     bool engine153_config_model;
     uint32_t engine153_config[2][0x150 / 4];
     uint64_t engine153_config_writes[2], engine153_reset_pulses[2];
-    bool primary_capture_direct_stop_model;
+    bool primary_capture_direct_stop_model, primary_capture_deferred;
+    uint64_t primary_capture_deferred_epoch, primary_capture_deferred_requests;
     uint64_t primary_capture_direct_stops;
     uint32_t primary_capture_direct_coalesced_units;
+    uint32_t primary_capture_command_pending;
+    uint64_t primary_capture_command_events, primary_capture_command_acks;
     bool primary_d980_channel_boundary_model;
     uint64_t primary_d980_channel_boundaries, primary_d980_channel_coalesced;
     bool primary_d980_stream_model;
@@ -732,6 +860,10 @@ struct NikonZ9State {
     uint64_t primary_reset_parameter_retention_events;
     unsigned primary_reset_stage;
     uint64_t primary_reset_count, primary_idle_pulse_resets;
+    bool primary_reset_queued_start_model;
+    uint32_t primary_reset_queued_units, primary_reset_queued_d980[28];
+    uint64_t primary_reset_queued_starts, primary_reset_resumed_starts, primary_masked_end_restarts;
+    uint64_t primary_empty_capture_stops, primary_empty_capture_epoch;
     /* Optional software-view statistics fed by a real Bayer fixture. No
      * physical sensor geometry or complete ISP semantics are inferred. */
     bool statistics_model;
@@ -753,6 +885,9 @@ struct NikonZ9State {
     uint32_t stream154c_config[3][0x400 / 4];
     bool stream154c_stop_model;
     uint64_t stream154c_stop_requests[3], stream154c_reset_commands[3];
+    bool event_programmed_clock_model;
+    uint64_t event_programmed_clock_ticks[15], event_programmed_clock_events[15];
+    uint64_t event_programmed_clock_coalesced[15];
     uint32_t event_mask_1508;
     uint32_t event_pending_1508;
     uint32_t event_config_1508[15][13];
@@ -1447,6 +1582,16 @@ static void provision_bus_windows(NikonZ9State *s)
                 if (s->dsp_ram_aperture_fixture && group >= 3 && group <= 5 &&
                         (entry == 0 || (paired && entry == 1))) {
                     words[1] = (UINT64_C(1) << 36) - MACHINE(s)->ram_size;
+                }
+                /* Native600 allocates PCM near a1e90c000. The original
+                 * group0 translator scans eight ports per direction; all old
+                 * 128MiB windows miss that buffer and return local address0.
+                 * Extend only each direction's last explicit lab aperture to
+                 * 512MiB. Earlier aliases/port order stay intact and these
+                 * final spans do not overlap another port in that direction.
+                 * This is boot input, not a measured physical-camera map. */
+                if (group == 0 && entry >= 14) {
+                    words[1] = UINT64_C(0xfe0000000);
                 }
                 if (group == 16) {
                     words[0] = 0x80000000;
@@ -2163,7 +2308,8 @@ static bool graphics_render_image(NikonZ9State *s)
     bool a8 = g->config48[0x4b4] == 0x21;
     bool planar = (g->config48[0x21] & 0xffff) == 0x71;
     bool yuva = planar || (g->config48[0x21] & 0xffff) == 0x72;
-    bool stencil = a8 && g->config48[0x610] == 0x39 && g->config48[0x611] == 2 &&
+    /* Native image STENCIL selects alpha coverage for RGBA as well as A8. */
+    bool stencil = g->config48[0x610] == 0x39 && g->config48[0x611] == 2 &&
                    g->config48[0x630] == 0 && g->config48[0x650] == 0;
     bool normal = g->config48[0x610] == 0 && g->config48[0x611] == 0 &&
                   g->config48[0x630] == (a8 ? 3 : 0) && g->config48[0x650] == (a8 ? 2 : 0);
@@ -6730,6 +6876,7 @@ static char *get_event_global1_state(Object *obj, Error **errp)
 /* Original 40c2b124 registers INTID fe -> 40c2b190, whose first callback
  * slot is the observed 41159e0c. Only external channel-zero status is
  * currently supplied. No DMA/pixel completion is inferred from this bit. */
+static void primary_capture_deferred_try(NikonZ9State *s);
 static void event_channel_update_irq(NikonZ9State *s)
 {
     if (s->event_channel_irq) {
@@ -6737,6 +6884,7 @@ static void event_channel_update_irq(NikonZ9State *s)
                      (s->event_pending_1508 & s->event_mask_1508));
     }
     event_front_boundary_update(s);
+    primary_capture_deferred_try(s);
 }
 
 static bool get_event1508_channel_model(Object *obj, Error **errp)
@@ -6974,7 +7122,16 @@ static void primary_d980_single_arm(NikonZ9State *s);
 static bool video_raw_descriptor(NikonZ9State *s);
 static void video_backend_drain_tick(NikonZ9State *s);
 static void engine152c_stream_irq_update(NikonZ9State *s);
+
+static bool video_raw_has_decoder_packet(NikonZ9State *s);
+static bool video_raw_packet_blocks_producer(NikonZ9State *s)
+{
+    return s->video_raw_packet_owned && (!s->video_raw_receiver_banks_model ||
+        (s->engine1530_active && video_raw_has_decoder_packet(s)));
+}
+
 static bool video_raw_receive(NikonZ9State *s);
+static void video_primary_input_boundary_tick(NikonZ9State *s, bool sensor);
 static void video_raw_decoder_irq_update(NikonZ9State *s);
 
 static bool primary_d980_finite_input_owned(NikonZ9State *s)
@@ -6982,6 +7139,8 @@ static bool primary_d980_finite_input_owned(NikonZ9State *s)
     return !video_raw_descriptor(s) && s->primary_d980_live_single_model && s->primary_d980_single_model &&
            (s->engine150c_active & 0x4000);
 }
+
+#include "nikon-expeed-programmed-clock.h"
 
 static void event_timing_expire(void *opaque)
 {
@@ -7014,6 +7173,7 @@ static void event_timing_expire(void *opaque)
      * is a functional timing assumption, not measured sensor signaling. */
     s->event_aux0_pending |= s->event1508_aux_paired_boundary ? 3 : 2;
     if (!primary_d980_finite_input_owned(s)) { s->event_pending_1508 |= 1; }
+    programmed_clock_tick(s);
     event_aux0_update_irq(s);
     event_channel_update_irq(s);
     if (s->event1508_global0_model) {
@@ -7323,6 +7483,7 @@ static bool serial5_audio_config_access(NikonZ9State *s, hwaddr addr,
     if (off == 8) {
         s->serial5_audio_starts += ctpop32((next & ~*field) & 0x3000);
         s->serial5_audio_stops += ctpop32((*field & ~next) & 0x3000);
+        if (!(next & 0x1000)) { s->serial5_pcm_phase[(addr-0x0e200100)/0x100]=0; }
     }
     *field = next; s->serial5_audio_writes++;
     return true;
@@ -7584,6 +7745,7 @@ static void serial_pio_update(NikonZ9State *s, unsigned ch)
 
 static void serial_abort(NikonZ9State *s, unsigned ch)
 {
+    if (ch == 8 && s->serial8_write_peer_timer) { timer_del(s->serial8_write_peer_timer); }
     if (ch == 2 && s->serial_write_peer_timer) { timer_del(s->serial_write_peer_timer); }
     memset(&s->serial_pio[ch], 0, sizeof(s->serial_pio[ch]));
     qemu_set_irq(s->serial_irq[ch], 0);
@@ -7621,6 +7783,88 @@ static bool pdma_write(NikonZ9State *s, unsigned ch, unsigned word, uint32_t val
     r[word] = value;
     pdma_irq_update(s, ch);
     return true;
+}
+
+/* Explicit external complete PCM blocks. The controller request and RAM
+ * mapping are original. This functional interface defines stereo LE32 words;
+ * silicon packing, sample rate, serial edge timing and DSP are not inferred.
+ * Until a complete external block arrives, no byte or success is produced. */
+static int serial5_pcm_request(NikonZ9State *s, unsigned channel, uint64_t *physical)
+{
+    if (channel>=5 || !s->bootstrap_fixtures || !s->bus_window_fixture || !s->serial_fixture ||
+        !s->serial5_audio_config_model || !(s->serial5_config[channel][0]&0x1000)) { return -1; }
+    int found=-1;
+    for (unsigned ch=0;ch<24;ch++) {
+        uint32_t *r=s->peripheral24[ch];
+        unsigned request=25+channel*4+s->serial5_pcm_phase[channel];
+        if (!(r[0]&0x80000000) || ((r[0]>>24)&0x3f)!=request ||
+            r[4]!=0x0e200138+channel*0x100) { continue; }
+        unsigned words=(r[0]&0xffff)+1;
+        uint64_t target;
+        if (found>=0 || (r[0]&0x40ff0000) || (r[1]&0x70000) ||
+            (r[1]&~0x001f0000u)!=0x2ae00000 || (r[2]&~0x404u) || r[3] ||
+            !(s->peripheral_global[ch/8]&0x80000000) || (words&1) ||
+            !pdma_ram_address(s,1,r[6],words*4,&target) || (target&3)) { return -1; }
+        /* Refuse overlap with any other armed RX destination, including the
+         * other half of this channel, before either buffer is touched. */
+        for (unsigned other=0;other<24;other++) {
+            uint32_t *q=s->peripheral24[other];uint64_t address;
+            unsigned bytes=((q[0]&0xffff)+1)*4;
+            if (other==ch || !(q[0]&0x80000000) ||
+                q[4]<0x0e200100 || q[4]>=0x0e200600 || (q[4]&255)!=0x38) { continue; }
+            if (pdma_ram_address(s,1,q[6],bytes,&address) &&
+                target<address+bytes && address<target+words*4) { return -1; }
+        }
+        found=ch;*physical=target;
+    }
+    return found;
+}
+
+static void set_serial5_pcm_input(Object *obj, const char *value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    unsigned channel,phase;uint32_t local,words,left,right;char extra;
+    if (strspn(value,"0123456789abcdefABCDEF:")!=strlen(value) ||
+        sscanf(value,"%1u:%1u:%8"SCNx32":%8"SCNx32":%8"SCNx32":%8"SCNx32"%c",
+            &channel,&phase,&local,&words,&left,&right,&extra)!=6 || channel>=5 || phase>1) {
+        error_setg(errp,"PCM input requires channel:phase:local:word-count:left:right hex32");return;
+    }
+    uint64_t target;int ch=serial5_pcm_request(s,channel,&target);
+    if (ch<0 || phase!=s->serial5_pcm_phase[channel] ||
+        local!=s->peripheral24[ch][6] || words!=(s->peripheral24[ch][0]&0xffff)+1) {
+        error_setg(errp,"PCM input does not match one enabled mapped pending RX descriptor");return;
+    }
+    uint8_t *data=g_malloc(words*4);
+    for (unsigned i=0;i<words;i+=2) {
+        stl_le_p(data+i*4,left);stl_le_p(data+i*4+4,right);
+    }
+    MemTxResult result=address_space_write(&address_space_memory,target,
+        MEMTXATTRS_UNSPECIFIED,data,words*4);
+    g_free(data);
+    if (result!=MEMTX_OK) { error_setg(errp,"PCM RAM write failed; no completion issued");return; }
+    s->serial5_pcm_blocks[channel]++;s->serial5_pcm_words[channel]+=words;
+    s->serial5_pcm_irqs[channel]+=!!(s->peripheral24[ch][1]&0x80000);
+    s->serial5_pcm_phase[channel]^=1;
+    /* Actual bytes precede device success. The original ISR owns its callback,
+     * status acknowledgement and next buffer submission. */
+    pdma_progress(s,ch,0);
+}
+
+static char *get_serial5_pcm_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);GString *out=g_string_new("{\"channels\":[");
+    for (unsigned i=0;i<5;i++) {
+        uint64_t physical=0;int ch=serial5_pcm_request(s,i,&physical);
+        g_string_append_printf(out,"%s{\"channel\":%u,\"phase\":%u,\"ready\":%s,"
+            "\"dma_channel\":%d,\"local\":%u,\"words\":%u,\"physical\":%"PRIu64
+            ",\"blocks\":%"PRIu64",\"received_words\":%"PRIu64",\"irq_assertions\":%"PRIu64"}",
+            i?",":"",i,s->serial5_pcm_phase[i],ch>=0?"true":"false",ch,
+            ch>=0?s->peripheral24[ch][6]:0,ch>=0?(s->peripheral24[ch][0]&0xffff)+1:0,
+            ch>=0?physical:0,s->serial5_pcm_blocks[i],s->serial5_pcm_words[i],s->serial5_pcm_irqs[i]);
+    }
+    g_string_append(out,"],\"physical_clock_verified\":false,\"physical_packing_verified\":false,"
+        "\"scope\":\"explicit complete stereo LE32 blocks, actual original RX DMA and IRQ; no codec/DSP execution\"}");
+    return g_string_free(out,false);
 }
 
 static bool serial_enable(NikonZ9State *s, unsigned ch)
@@ -7828,8 +8072,20 @@ static void set_serial_clock(Object *obj, const char *value, Error **errp)
  * SPI wire RX zero is discarded by the original request (RX pointer MUST0).
  * This clocks real FIFO words and normal IRQs, never software flags/PC/PCM.
  * The1us delay is functional, not a measured physical clock/codec property. */
+static void serial8_write_peer_schedule(NikonZ9State *s, unsigned ch)
+{
+    Z9SerialPIO *p = &s->serial_pio[8];
+    if (ch == 8 && s->serial8_write_peer_enabled && !s->serial8_write_peer_fault &&
+            p->active && p->tx_queued && p->rx_queued < 64 &&
+            !timer_pending(s->serial8_write_peer_timer)) {
+        timer_mod(s->serial8_write_peer_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000);
+    }
+}
+
 static void serial_write_peer_schedule(NikonZ9State *s, unsigned ch)
 {
+    serial8_write_peer_schedule(s, ch);
     Z9SerialPIO *p = &s->serial_pio[2];
     if (ch == 2 && s->serial_write_peer_enabled && !s->serial_write_peer_fault &&
             p->active && p->tx_queued && p->rx_queued < 64 &&
@@ -8010,6 +8266,134 @@ static void serial_write_peer_tick(void *opaque)
     s->serial_write_peer_words += n;
     s->serial_write_peer_batches++;
     serial_write_peer_schedule(s, 2);
+}
+
+static void serial8_write_peer_tick(void *opaque)
+{
+    NikonZ9State *s = opaque;
+    Z9SerialPIO *p = &s->serial_pio[8];
+    if (!s->serial8_write_peer_enabled || s->serial8_write_peer_fault ||
+            !p->active || !p->tx_queued || p->rx_queued == 64) { return; }
+    unsigned n = MIN(p->tx_queued, 64 - p->rx_queued);
+    uint8_t descriptor[0x68], source[128];
+    const char *fault = NULL;
+    uint64_t tx = 0, rx = 0;
+    unsigned total = 0;
+    if (p->word_bits != 8 || s->serial_transfer[8].linked ||
+            !(s->serial_config[8][7] & 1)) {
+        fault = "unsupported-controller-mode";
+    } else if (!dma_ram_range(s, s->serial8_write_peer_descriptor, sizeof(descriptor)) ||
+            address_space_read(&address_space_memory, s->serial8_write_peer_descriptor,
+                MEMTXATTRS_UNSPECIFIED, descriptor, sizeof(descriptor)) != MEMTX_OK) {
+        fault = "descriptor-outside-ram";
+    } else {
+        tx = ldq_le_p(descriptor + 0x20);
+        rx = ldq_le_p(descriptor + 0x30);
+        total = ldl_le_p(descriptor + 0x28);
+        if (ldl_le_p(descriptor + 8) != 8 || rx || !tx || (tx & 1) ||
+                !total || total > 65536 || p->clocked > total ||
+                n > total - p->clocked ||
+                !dma_ram_range(s, tx, (uint64_t)total * 2)) {
+            fault = "not-bounded-discarded-rx-request";
+        } else if (n > s->serial8_write_peer_limit - s->serial8_write_peer_words) {
+            fault = "explicit-word-budget-exhausted";
+        } else if (address_space_read(&address_space_memory, tx + 2 * p->clocked,
+                MEMTXATTRS_UNSPECIFIED, source, n * 2) != MEMTX_OK) {
+            fault = "original-source-read-failed";
+        } else {
+            for (unsigned i = 0; i < n; i++) {
+                if ((lduw_le_p(source + 2 * i) & 255) !=
+                        (p->tx[(p->tx_head + i) % ARRAY_SIZE(p->tx)] & 255)) {
+                    fault = "fifo-differs-from-original-source";
+                    break;
+                }
+            }
+        }
+    }
+    if (fault) {
+        s->serial8_write_peer_fault = fault;
+        fprintf(stderr, "Z9_SERIAL8_WRITE_PEER rejected=%s; no clocks or success\n", fault);
+        return;
+    }
+    char clocks[2 + 64 * 4 + 1];
+    clocks[0] = '8'; clocks[1] = ':';
+    memset(clocks + 2, '0', n * 4); clocks[2 + n * 4] = 0;
+    Error *error = NULL;
+    set_serial_clock(OBJECT(s), clocks, &error);
+    if (error) {
+        error_free(error);
+        s->serial8_write_peer_fault = "existing-clock-rejected";
+        return;
+    }
+    /* Source was independently checked against every actual FIFO word;
+     * hash the separately encoded wire output, not a copied source buffer. */
+    uint8_t wire[128];
+    for (unsigned i = 0; i < n * 2; i++) {
+        wire[i] = (g_ascii_xdigit_value(s->serial_last_tx[i * 2]) << 4) |
+                   g_ascii_xdigit_value(s->serial_last_tx[i * 2 + 1]);
+    }
+    /* Descriptor containers are16-bit, but only the low8 bits go on wire. */
+    for (unsigned i=0;i<n;i++) { source[2*i+1]=0; }
+    g_checksum_update(s->serial8_write_peer_source_hash, source, n * 2);
+    g_checksum_update(s->serial8_write_peer_wire_hash, wire, n * 2);
+    s->serial8_write_peer_words += n;
+    s->serial8_write_peer_batches++;
+    serial8_write_peer_schedule(s, 8);
+}
+
+static void set_serial8_write_peer(Object *obj, const char *value, Error **errp)
+{
+    NikonZ9State *s = NIKON_Z9_LAB(obj);
+    uint64_t descriptor, limit;
+    char extra;
+    if (s->serial_pio[8].active || s->serial_transfer[8].linked) {
+        error_setg(errp, "serial write peer input cannot change while channel8 is active");
+        return;
+    }
+    if (!strcmp(value, "off")) {
+        s->serial8_write_peer_enabled = false;
+        if (s->serial8_write_peer_timer) { timer_del(s->serial8_write_peer_timer); }
+        return;
+    }
+    if (!s->serial_fixture || sscanf(value, "8:%"SCNx64":%"SCNu64"%c",
+            &descriptor, &limit, &extra) != 2 ||
+            descriptor < UINT64_C(0xa00000000) || (descriptor & 7) ||
+            descriptor > UINT64_C(0xa40000000) - 0x68 || !limit || limit > 1048576) {
+        error_setg(errp, "serial write peer needs fixture and8:aligned-RAM-descriptor:1..1048576-words");
+        return;
+    }
+    if (s->serial8_write_peer_words) {
+        error_setg(errp, "serial write peer budget and source are immutable after first clock");
+        return;
+    }
+    s->serial8_write_peer_descriptor = descriptor;
+    s->serial8_write_peer_limit = limit;
+    s->serial8_write_peer_fault = NULL;
+    if (!s->serial8_write_peer_timer) {
+        s->serial8_write_peer_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, serial8_write_peer_tick, s);
+        s->serial8_write_peer_source_hash = g_checksum_new(G_CHECKSUM_SHA256);
+        s->serial8_write_peer_wire_hash = g_checksum_new(G_CHECKSUM_SHA256);
+    }
+    s->serial8_write_peer_enabled = true;
+}
+
+static char *get_serial8_write_peer_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    char source[65]="", wire[65]="";
+    if (s->serial8_write_peer_source_hash) {
+        GChecksum *copy=g_checksum_copy(s->serial8_write_peer_source_hash);
+        g_strlcpy(source,g_checksum_get_string(copy),sizeof(source));g_checksum_free(copy);
+        copy=g_checksum_copy(s->serial8_write_peer_wire_hash);
+        g_strlcpy(wire,g_checksum_get_string(copy),sizeof(wire));g_checksum_free(copy);
+    }
+    return g_strdup_printf("{\"enabled\":%s,\"channel\":8,\"wire_bits\":8,"
+        "\"descriptor\":%"PRIu64",\"word_budget\":%"PRIu64",\"words\":%"PRIu64
+        ",\"batches\":%"PRIu64",\"fault\":\"%s\",\"source_sha256\":\"%s\","
+        "\"wire_sha256\":\"%s\",\"discarded_rx\":true,\"physical_protocol_verified\":false}",
+        s->serial8_write_peer_enabled?"true":"false",s->serial8_write_peer_descriptor,
+        s->serial8_write_peer_limit,s->serial8_write_peer_words,s->serial8_write_peer_batches,
+        s->serial8_write_peer_fault?s->serial8_write_peer_fault:"",source,wire);
 }
 
 static void set_serial_write_peer(Object *obj, const char *value, Error **errp)
@@ -8847,7 +9231,7 @@ static void engine150c_stop_irq_update(NikonZ9State *s)
     qemu_set_irq(s->engine150c_irq,
                  !!((s->engine150c_stop_pending & s->engine_150c_init[0x218 / 4]) |
                     ((s->statistics_pending | s->raw_primary_pending | s->raw_source_pending | s->primary_d980_pending | s->engine150c_direct_stop_pending1) & s->engine_150c_init[0x20c / 4]) |
-                    ((s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
+                    ((s->primary_capture_command_pending | s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
                       s->engine150c_bit6_pending | s->video_primary_boundaries_pending) &
                      s->engine_150c_init[0x200 / 4])));
     statistics_update(s);
@@ -9522,6 +9906,15 @@ static void engine150c_bit6_pulse(NikonZ9State *s)
         (s->engine150c_stop_requested & 2)) {
         return;
     }
+    /* Original ZR40eb7fbc/7fd4 uses bit6 for an early drain event when
+     * its source condition permits. bit2 is a separate subscriber path.
+     * Native659: periodic0x44 arrived before finite input and downstream
+     * processing cancelled before the next DMA. Keep bit2 timing intact;
+     * this opt-in ties only bit6 to an actual same-epoch finite frame.
+     * Preview/video and the default diagnostic clock remain unchanged. */
+    if (s->primary_reset_queued_start_model && s->primary_d980_single_model &&
+        (s->engine150c_active&0x4000) && !video_raw_descriptor(s) &&
+        s->primary_d980_input_epoch!=s->primary_d980_single_epoch) { return; }
     s->engine150c_bit6_inputs++;
     s->engine150c_bit6_pending |= 0x40;
     engine150c_stop_irq_update(s);
@@ -9556,12 +9949,12 @@ static bool engine150c_stop_read(NikonZ9State *s, hwaddr addr,
         *value = (s->engine150c_stop_done & 8) ? 0x40 : 0;
         return true;
     case 0x150c0204:
-        *value = (s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
+        *value = (s->primary_capture_command_pending | s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
                   s->engine150c_bit6_pending | s->video_primary_boundaries_pending) &
                  s->engine_150c_init[0x200 / 4];
         return true;
     case 0x150c0208:
-        *value = s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
+        *value = s->primary_capture_command_pending | s->engine150c_direct_stop_pending | s->primary_empty_end_pending | s->engine150c_bit2_pending |
                  s->engine150c_bit6_pending | s->video_primary_boundaries_pending;
         return true;
     case 0x150c0210: case 0x150c0214:
@@ -10449,10 +10842,15 @@ static void set_primary_capture_direct_stop_model(Object *obj, bool value, Error
 static char *get_primary_capture_direct_stop_state(Object *obj, Error **errp)
 {
     NikonZ9State *s = NIKON_Z9_LAB(obj);
-    return g_strdup_printf("{\"enabled\":%s,\"drains\":%" PRIu64
-        ",\"coalesced_idle_units\":%u,\"scope\":\"observed401e synchronous direct drain after complete single frame and channel ACK; shared pending coalescing is a functional hypothesis\"}",
-        s->primary_capture_direct_stop_model ? "true" : "false", s->primary_capture_direct_stops,
-        s->primary_capture_direct_coalesced_units);
+    return g_strdup_printf("{\"enabled\":%s,\"drains\":%"PRIu64
+        ",\"coalesced_idle_units\":%u,\"deferred\":%s,\"deferred_epoch\":%"PRIu64
+        ",\"deferred_requests\":%"PRIu64
+        ",\"command_pending\":%u,\"command_events\":%"PRIu64
+        ",\"command_acks\":%"PRIu64",\"scope\":\"401e pixel drain waits for real input/channel ACK; optional empty control stop creates no image\"}",
+        s->primary_capture_direct_stop_model?"true":"false",s->primary_capture_direct_stops,
+        s->primary_capture_direct_coalesced_units,s->primary_capture_deferred?"true":"false",
+        s->primary_capture_deferred_epoch,s->primary_capture_deferred_requests,
+        s->primary_capture_command_pending,s->primary_capture_command_events,s->primary_capture_command_acks);
 }
 
 static char *get_primary_d980_state(Object *obj, Error **errp)
@@ -10568,6 +10966,27 @@ static void set_primary_reset_idle_stop_model(Object *obj, bool value, Error **e
     s->primary_reset_idle_stop_model = value;
 }
 
+static bool get_primary_reset_queued_start_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->primary_reset_queued_start_model; }
+static void set_primary_reset_queued_start_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"queued start policy is immutable after realization"); return;
+    }
+    s->primary_reset_queued_start_model=value;
+}
+static char *get_primary_reset_queued_start_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"enabled\":%s,\"pending_units\":%u,\"queued\":%"PRIu64
+        ",\"resumed\":%"PRIu64",\"masked_end_restarts\":%"PRIu64
+        ",\"empty_capture_stops\":%"PRIu64",\"empty_capture_epoch\":%"PRIu64",\"physical_reset_verified\":false}",
+        s->primary_reset_queued_start_model?"true":"false",s->primary_reset_queued_units,
+        s->primary_reset_queued_starts,s->primary_reset_resumed_starts,s->primary_masked_end_restarts,
+        s->primary_empty_capture_stops,s->primary_empty_capture_epoch);
+}
+
 static char *get_primary_reset_state(Object *obj, Error **errp)
 {
     NikonZ9State *s = NIKON_Z9_LAB(obj);
@@ -10597,32 +11016,76 @@ static void set_primary_reset_parameter_retention_model(Object *obj, bool value,
 static char *get_primary_reset_parameter_retention_state(Object *obj, Error **errp)
 {
     NikonZ9State *s = NIKON_Z9_LAB(obj);
-    return g_strdup_printf("{\"enabled\":%s,\"supported_units\":6,\"last_retained\":%u,"
+    return g_strdup_printf("{\"enabled\":%s,\"supported_units\":16414,\"last_retained\":%u,"
         "\"retention_events\":%" PRIu64 ",\"pixel_bytes\":0,\"completion_events\":0,"
         "\"physical_reset_semantics_verified\":false,"
-        "\"scope\":\"retain only alreadyconfigured upper/E parameter validity across bounded reset; activity/latch/events still cancel\"}",
+        "\"scope\":\"retain only previously configured capture401e parameter validity across bounded reset; activity/latch/events still cancel\"}",
         s->primary_reset_parameter_retention_model ? "true" : "false",
         s->primary_reset_parameter_retained, s->primary_reset_parameter_retention_events);
 }
 
 static uint32_t primary_direct_map(uint32_t bits, unsigned group, bool inverse);
+static bool capture_stream_can_rearm(NikonZ9State *s, unsigned j);
+/* Native653 has an entire admitted153->151->NV16 graph waiting for
+ * the next input, not an active DMA. Resetting the independent upstream
+ * generation must retain these promises, descriptors, buffers and IRQs. */
+static bool primary_future_capture_graph_owned(NikonZ9State *s)
+{
+    unsigned bank=s->engine151_capture_wait_bank;
+    bool receiver=s->primary_reset_queued_start_model &&
+        !s->engine151_active[1] && !s->engine151_capture_pending &&
+        !s->engine151_pending[0] && !s->engine151_pending[1] &&
+        s->capture_nv16_requested && !s->capture_nv16_failed &&
+        s->capture_nv16_consumed151==s->engine151_capture_jobs &&
+        s->engine1543_active[1] && !s->engine1543_held[1] &&
+        !s->engine1542_pending[1] && !s->engine1542_pending[11] && !s->engine1518[0].pending;
+    if (!receiver) { return false; }
+    /* Native657: original151 cancellation leaves the admitted C1 receiver
+     * waiting independently. Upstream reset neither cancels nor completes
+     * it; only a later actual151 producer may satisfy that receiver. */
+    if (!s->engine151_active[0]) { return !s->engine151_capture_waiting; }
+    return bank<2 && s->engine151_capture_waiting && !s->engine151_capture_wait_failed &&
+        s->engine151_capture_wait_after==s->primary_d980_frames &&
+        s->engine153_waiting[bank] && !s->engine153_wait_failed[bank] &&
+        s->engine153_wait_after[bank]==s->primary_d980_frames && !s->engine153_pending[bank];
+}
+
 static bool primary_idle_pulse_quiescent(NikonZ9State *s)
 {
     /* Native50340e20198 omits the c7ff7f prefix. Only reset an already
      * retired idle generation, with exact mapped causes and no fresh
      * source/latch/request/data owner. Hardware reset cancels its masked
      * END causes; it does not execute an ISR ACK or complete a pixel job. */
+    /* Native597: another CPU enables401e before this original cleanup
+     * assertion. That new epoch has never armed or received external input.
+     * Cancel its enable/latch along with the old idle causes. An armed,
+     * completed or pending capture still cannot use this prefix-free path. */
+    bool unarmed_capture = s->primary_reset_parameter_retention_model &&
+        s->primary_d980_single_model &&
+        s->engine150c_active == 0x401e && s->engine150c_latched == 0x401e &&
+        (s->engine150c_configured & 0x401e) == 0x401e &&
+        s->primary_d980_input_epoch > s->primary_d980_single_epoch &&
+        !s->primary_d980_single_armed && !s->primary_d980_prepared &&
+        !s->primary_capture_deferred;
     return s->primary_reset_idle_stop_model && s->primary_stopped_source_reset_model &&
         s->primary_reset_count && !s->primary_reset_stage && !s->event_timing_active &&
         s->primary_idle_direct_done && s->primary_idle_direct_done==s->engine150c_direct_stop_done &&
         s->engine150c_direct_stop_pending==primary_direct_map(s->primary_idle_direct_done,0,false) &&
         s->engine150c_direct_stop_pending1==primary_direct_map(s->primary_idle_direct_done,1,false) &&
-        !s->engine150c_active && !s->engine150c_latched && !s->engine150c_stop_requested &&
-        !s->engine150c_stop_done && !s->engine150c_stop_pending &&
+        ((!s->engine150c_active && !s->engine150c_latched) || unarmed_capture) &&
+        !s->engine150c_stop_requested && !s->engine150c_stop_done && !s->engine150c_stop_pending &&
         !s->engine150c_stop_reset_asserted && !s->engine150c_stop_reset_released &&
-        !s->video_raw_packet_owned && !s->video_raw_frame_ready && !s->wave5_busy &&
+        !video_raw_packet_blocks_producer(s) && !s->video_raw_frame_ready && !s->wave5_busy &&
         !s->engine152c_stream_requested && !s->engine152c_stream_pending && !s->engine1530_active &&
-        !(s->engine1530_config[0x1c/4]&12) && !s->engine1543_active[1] &&
+        !(s->engine1530_config[0x1c/4]&12) &&
+        /* Native604 retains a held C1 from the preceding capture while a
+         * different CPU cleans the primary units. Reuse the existing full
+         * receiver ownership check; this reset changes neither its header,
+         * output surfaces nor pending JPEG consumption. */
+        (!s->engine1543_active[1] ||
+         (unarmed_capture && !s->engine151_capture_pending &&
+          ((!s->engine151_active[0] && !s->engine151_active[1] && capture_stream_can_rearm(s,1)) ||
+           primary_future_capture_graph_owned(s)))) &&
         !s->raw_primary_pending && !s->raw_source_pending && !s->statistics_pending && !s->primary_d980_pending &&
         !s->engine1542_pending[0] && !s->engine1542_pending[1] &&
         !s->engine1542_pending[10] && !s->engine1542_pending[11] &&
@@ -10641,7 +11104,7 @@ static bool primary_bounded_reset_write(NikonZ9State *s, hwaddr addr,
         !((addr == 0x150c0014 && (value == 0xc7ff7f || value == 0x4f04f)) ||
           ((addr == 0x150c0000 || addr == 0x150c0004) && value == 0x17ff7f)) ||
         (!s->primary_reset_stage && !(s->engine150c_active | s->engine150c_latched |
-            s->engine150c_direct_stop_done | s->engine150c_direct_stop_pending |
+            s->primary_capture_command_pending | s->engine150c_direct_stop_done | s->engine150c_direct_stop_pending |
             s->engine150c_direct_stop_pending1 | s->primary_d980_prepared))) {
         return false;
     }
@@ -10680,13 +11143,24 @@ static bool primary_bounded_reset_write(NikonZ9State *s, hwaddr addr,
                     s->engine150c_stop_requested | s->engine150c_stop_done |
                     s->engine150c_direct_stop_done;
     if (size != 4 || (live & ~allowed) || (!raw_quiescent &&
-        (s->engine150c_direct_stop_done | s->engine150c_direct_stop_pending |
+        (s->primary_capture_command_pending | s->engine150c_direct_stop_done | s->engine150c_direct_stop_pending |
          s->engine150c_direct_stop_pending1))) {
         goto invalid;
     }
     if (size==4 && addr==0x150c0000 && value==0x17ff7f &&
         (s->engine_150c_init[0x10/4]&0x4f04f)==0x4f04f &&
         (s->engine_150c_init[0x18/4]&0x4f04f)==0x4f04f && primary_idle_pulse_quiescent(s)) {
+        /* Explicit candidate: native646 has a newly enabled, never armed
+         * capture while the preceding generation still owns idle END causes.
+         * Keep that new enable/descriptor across the old prefix-free reset.
+         * Reset still cancels old causes and all activity while asserted.
+         * This inference is not a measured silicon reset specification. */
+        if (s->primary_reset_queued_start_model && s->engine150c_active==0x401e) {
+            s->primary_reset_queued_units=0x401e;
+            memcpy(s->primary_reset_queued_d980,s->primary_d980_latched,
+                   sizeof(s->primary_reset_queued_d980));
+            s->primary_reset_queued_starts++;
+        }
         s->primary_reset_stage=1;s->primary_idle_pulse_resets++;
     }
     if (!s->primary_reset_stage && addr == 0x150c0014 && value == 0xc7ff7f) {
@@ -10698,17 +11172,23 @@ static bool primary_bounded_reset_write(NikonZ9State *s, hwaddr addr,
          * synchronously before IRQ; assertion cancels future ticks and
          * pending notifications without fabricating an ISR acknowledgement.
          * Shadow tables/RAM stay intact, activity/latch/events clear. The
-         * optional retention model preserves only alreadyconfigured upper/E
-         * validity: native495 reuses6 after reset without new parameter writes.
+         * optional retention model preserves previously configured capture
+         * parameter validity: native495 reuses6 and native594 reuses401e
+         * after reset without resubmitting the retained shadow tables.
          * No other unit becomes configured, no start/ready/IRQ is implied;
          * physical register/reset semantics remain a functional hypothesis. */
         if (s->primary_reset_idle_stop_model) {
-            s->primary_reset_previous_units = s->engine150c_active | s->engine150c_latched;
+            /* Each bit records one unconsumed, quiescent unit. A later
+             * reset of a subset (native591: 3f5f then2) must not erase the
+             * other units awaiting their original STOP. Fresh START and
+             * accepted idle STOP consume only their selected bits below.
+             * Empty resets cannot recreate already-consumed provenance. */
+            s->primary_reset_previous_units |= s->engine150c_active | s->engine150c_latched;
         }
         s->engine150c_idle_stop_requested = 0;
         s->primary_idle_direct_done = 0;
         s->primary_reset_parameter_retained = s->primary_reset_parameter_retention_model ?
-            (s->engine150c_configured & 6) : 0;
+            (s->engine150c_configured & 0x401e) : 0;
         if (s->primary_reset_parameter_retained) { s->primary_reset_parameter_retention_events++; }
         s->engine150c_active = s->engine150c_latched = 0;
         s->engine150c_configured = s->primary_reset_parameter_retained;
@@ -10717,6 +11197,7 @@ static bool primary_bounded_reset_write(NikonZ9State *s, hwaddr addr,
         s->engine150c_direct_stop_done = s->engine150c_direct_stop_pending =
             s->engine150c_direct_stop_pending1 = 0;
         s->primary_empty_end_pending = s->engine150c_bit2_pending = s->engine150c_bit6_pending = 0;
+        s->primary_capture_command_pending = 0;
         s->statistics_cancelled += !!s->statistics_pending;
         s->statistics_pending = 0;
         if (s->raw_pipeline_input_pair_model && (s->raw_primary_pending & 0x80000000)) {
@@ -10740,6 +11221,16 @@ static bool primary_bounded_reset_write(NikonZ9State *s, hwaddr addr,
                value == 0x4f04f && !(s->engine_150c_init[0x18 / 4] & 0x4f04f)) {
         s->primary_reset_stage = 0;
         s->primary_reset_count++;
+        if (s->primary_reset_queued_units) {
+            /* No new epoch, frame, ACK or IRQ. A later actual front/input
+             * transaction still has to arm and DMA the retained request. */
+            s->engine150c_active=s->engine150c_latched=s->primary_reset_queued_units;
+            s->primary_reset_previous_units &= ~s->primary_reset_queued_units;
+            memcpy(s->primary_d980_latched,s->primary_reset_queued_d980,
+                   sizeof(s->primary_d980_latched));
+            s->primary_reset_queued_units=0;
+            s->primary_reset_resumed_starts++;
+        }
         fprintf(stderr, "Z9_PRIMARY_BOUNDED_RESET count=%" PRIu64 "; modeled units; zero new pixels\n",
                 s->primary_reset_count);
     } else {
@@ -10786,8 +11277,10 @@ static uint32_t primary_direct_map(uint32_t bits, unsigned group, bool inverse)
 static bool video_forced_stop_quiescent(NikonZ9State *s)
 {
     return s->video_forced_stop_model && s->video_raw_transport_model &&
-        s->raw_pipeline_video_frames && !s->primary_reset_stage &&
-        !s->engine1543_active[1] && !s->video_raw_packet_owned &&
+        /* A requested, held and quiescent source may be cancelled before
+         * its first ISP output. Historical frame counts do not own DMA. */
+        !s->primary_reset_stage &&
+        !s->engine1543_active[1] && !video_raw_packet_blocks_producer(s) &&
         !s->engine152c_stream_pending && !(s->engine1530_config[0x1c/4]&4) &&
         !s->engine1542_pending[1] && !s->engine1542_pending[10] && !s->engine1542_pending[11] &&
         !s->raw_primary_pending && !s->raw_source_pending && !s->statistics_pending &&
@@ -10902,6 +11395,30 @@ static bool engine150c_stop_write(NikonZ9State *s, hwaddr addr,
                 s->primary_d980_single_epoch == s->primary_d980_input_epoch &&
                 !s->primary_d980_single_armed && s->primary_d980_frames &&
                 !(s->event_pending_1508 & 1);
+            /* Native650: the original drain worker can stop a newly enabled
+             * but never triggered input. Complete control cancellation only;
+             * no image, source/channel notification, pixel job or W1C ACK.
+             * Armed/prepared/pending inputs keep the existing deferred path. */
+            bool capture_empty = capture_command && s->primary_reset_queued_start_model &&
+                s->primary_d980_single_model && !s->primary_reset_stage &&
+                s->engine150c_active == value && s->engine150c_latched == value &&
+                !(s->engine_150c_init[0x18/4] & value) &&
+                s->primary_d980_input_epoch > s->primary_d980_single_epoch &&
+                !s->primary_d980_single_armed && !s->primary_d980_prepared &&
+                !s->primary_d980_pending && !s->raw_primary_pending && !s->raw_source_pending &&
+                !(s->event_pending_1508 & 1) && !s->primary_capture_deferred &&
+                !s->primary_capture_command_pending && !s->primary_idle_direct_done;
+            /* Native579 short exposure requests STOP before the armed input
+             * timer fires. Accept drain intent, preserving that one transfer
+             * and every pending cause until actual frame/channel completion. */
+            bool capture_wait = capture_command && !capture_drained &&
+                !s->primary_capture_deferred && !s->primary_reset_stage &&
+                (s->engine150c_active & value) == value &&
+                !(s->engine_150c_init[0x18 / 4] & value) &&
+                s->primary_d980_input_epoch &&
+                (s->primary_d980_single_armed ||
+                 (s->primary_d980_single_epoch == s->primary_d980_input_epoch &&
+                  (s->event_pending_1508 & 1)));
             uint32_t command_engines = direct_engines | (capture_command ? 0xe : 0);
             uint32_t inactive = value & ~s->engine150c_active;
             bool idle_ok = s->primary_reset_idle_stop_model && s->primary_reset_count &&
@@ -10909,11 +11426,17 @@ static bool engine150c_stop_write(NikonZ9State *s, hwaddr addr,
                 (!s->event_timing_active || s->primary_preview_reset_model) &&
                 !(inactive & ~s->primary_reset_previous_units);
             if (size != 4 || (value & ~command_engines) ||
-                (capture_command && !capture_drained) ||
+                (capture_command && ((!capture_drained && !capture_wait && !capture_empty) || s->primary_capture_deferred)) ||
                 (inactive && !idle_ok) ||
                 (value & (s->engine150c_direct_stop_done &
-                    ~(capture_drained ? s->primary_idle_direct_done : 0)))) {
+                    ~((capture_drained || capture_wait) ? s->primary_idle_direct_done : 0)))) {
                 goto invalid;
+            }
+            if (capture_wait) {
+                s->primary_capture_deferred = true;
+                s->primary_capture_deferred_epoch = s->primary_d980_input_epoch;
+                s->primary_capture_deferred_requests++;
+                return true;
             }
             if (inactive) {
                 s->primary_reset_previous_units &= ~inactive;
@@ -10936,6 +11459,20 @@ static bool engine150c_stop_write(NikonZ9State *s, hwaddr addr,
                  * Unrelated old idle units preserve their prior ownership. */
                 s->primary_capture_direct_coalesced_units |= value & s->primary_idle_direct_done;
                 s->primary_idle_direct_done &= ~value;
+            }
+            /* Native ZR624 waits for event4000 after the 401e drain:
+             * ZR40eb9f1c/40eb8168, independently Z9 40cb03ec/40cae7f0.
+             * Group0 bit10 is command-end, distinct from unit stop bits.
+             * Only the existing same-epoch DMA + channel-ACK contract can
+             * reach capture_drained. Early requests still wait above.
+             * Retain this cause while masked until original W1C or reset. */
+            if (capture_empty) {
+                s->primary_empty_capture_stops++;
+                s->primary_empty_capture_epoch = s->primary_d980_input_epoch;
+            }
+            if (capture_drained || capture_empty) {
+                s->primary_capture_command_pending |= 0x400;
+                s->primary_capture_command_events++;
             }
             s->primary_capture_direct_stops += capture_command;
             s->engine150c_active &= ~value;
@@ -11001,6 +11538,7 @@ static bool engine150c_stop_write(NikonZ9State *s, hwaddr addr,
     } else if (addr == 0x150c0204 || addr == 0x150c0210 || addr == 0x150c021c) {
         uint32_t allowed = addr == 0x150c021c ? engine150c_stop_causes(allowed_engines) :
                            addr == 0x150c0204 ? (primary_direct_map(direct_engines, 0, false) | (s->primary_empty_end_model ? 0x108000 : 0) |
+                                                (s->primary_capture_direct_stop_model ? 0x400 : 0) |
                                                 (s->engine150c_bit2_model ? 4 : 0) |
                                                 (s->engine150c_bit6_model ? 0x40 : 0) |
                                                 (s->video_primary_boundaries_model ? 0x18 : 0)) :
@@ -11039,6 +11577,8 @@ static bool engine150c_stop_write(NikonZ9State *s, hwaddr addr,
             s->engine150c_stop_pending &= ~value;
             engine150c_stop_irq_update(s);
         } else if (addr == 0x150c0204) {
+            s->primary_capture_command_acks += !!(s->primary_capture_command_pending & value);
+            s->primary_capture_command_pending &= ~value;
             uint32_t ended = s->primary_empty_end_pending & value;
             uint32_t engines_ended = ((ended & 0x8000) >> 14) | ((ended & 0x100000) >> 18);
             s->primary_empty_end_pending &= ~value;
@@ -11182,6 +11722,31 @@ static char *get_primary_parameter_control_state(Object *obj, Error **errp)
 
 static bool primary_d980_ready(NikonZ9State *s);
 
+/* Native647: frame3 really completed and was stopped; its END causes
+ * remain masked when the original driver commits/starts frame4. An old
+ * masked notification does not own the idle input engine. Preserve W1C
+ * causes and ACK counts; only a real next input can create another frame. */
+static uint32_t primary_masked_capture_end_restart(NikonZ9State *s, uint64_t value)
+{
+    /* Idle-generation END remains owned by its original cleanup pulse.
+     * Native649 proved that consuming its overlapping unit4 here breaks
+     * the queued-start reset invariant after a real earlier exposure. */
+    uint32_t done=s->engine150c_direct_stop_done & value & ~s->primary_idle_direct_done;
+    if (!s->primary_reset_queued_start_model || !value || (value&~UINT64_C(0x401e)) || !done ||
+        s->primary_reset_stage ||
+        s->engine150c_stop_requested || s->engine150c_stop_done ||
+        s->primary_d980_single_armed || s->primary_d980_pending ||
+        s->raw_primary_pending || s->raw_source_pending ||
+        !s->primary_d980_single_frames ||
+        (s->primary_d980_input_epoch!=s->primary_d980_single_epoch &&
+         s->primary_d980_input_epoch!=s->primary_empty_capture_epoch)) { return 0; }
+    uint32_t p0=primary_direct_map(done,0,false),p1=primary_direct_map(done,1,false);
+    if ((s->engine150c_direct_stop_pending&p0)!=p0 ||
+        (s->engine150c_direct_stop_pending1&p1)!=p1 ||
+        (s->engine_150c_init[0x200/4]&p0) || (s->engine_150c_init[0x20c/4]&p1)) { return 0; }
+    return done;
+}
+
 static bool engine150c_control_write(NikonZ9State *s, hwaddr addr,
                                      uint64_t value, unsigned size)
 {
@@ -11207,6 +11772,7 @@ static bool engine150c_control_write(NikonZ9State *s, hwaddr addr,
                 current_cpu ? ARM_CPU(current_cpu)->env.pc : 0, addr);
         return true;
     }
+    uint32_t retired=primary_masked_capture_end_restart(s,value);
     uint32_t allowed = s->engine150d_control_model ? 0x33f0e : 0x33f06;
     if (s->primary_parameter_control_model) {
         allowed |= 0x40071;
@@ -11219,7 +11785,7 @@ static bool engine150c_control_write(NikonZ9State *s, hwaddr addr,
         (addr == 0x150c0008 && (value & s->engine150c_active)) ||
         (s->engine150c_stop_model &&
          (value & (s->engine150c_stop_requested | s->engine150c_stop_done |
-                   (s->engine150c_direct_stop_done & ~s->primary_idle_direct_done))))) {
+                   (s->engine150c_direct_stop_done & ~(s->primary_idle_direct_done | retired)))))) {
         unknown_access(s, addr, value, size, true);
         return true;
     }
@@ -11391,6 +11957,10 @@ static bool engine150c_control_write(NikonZ9State *s, hwaddr addr,
             unknown_access(s, addr, value, size, true);
             return true;
         }
+        if (retired) {
+            s->engine150c_direct_stop_done &= ~retired;
+            s->primary_masked_end_restarts++;
+        }
         s->primary_reset_previous_units &= ~value;
         s->engine150c_active |= value;
         if (s->primary_d980_single_model && (value & 0x4000) && !video_raw_descriptor(s)) {
@@ -11414,6 +11984,19 @@ static bool engine150c_control_write(NikonZ9State *s, hwaddr addr,
             addr, value, s->engine150c_latched, s->engine150c_active);
     statistics_update(s);
     return true;
+}
+
+static void primary_capture_deferred_try(NikonZ9State *s)
+{
+    if (!s->primary_capture_deferred || s->primary_reset_stage ||
+        s->primary_d980_single_armed || !s->primary_d980_single_epoch ||
+        s->primary_capture_deferred_epoch != s->primary_d980_input_epoch ||
+        s->primary_d980_single_epoch != s->primary_d980_input_epoch ||
+        !s->primary_d980_frames || (s->event_pending_1508 & 1)) { return; }
+    /* Original channel W1C reaches this point only after the DMA. Reuse the
+     * existing complete-frame drain and its shared-cause ownership checks. */
+    s->primary_capture_deferred = false;
+    engine150c_stop_write(s, 0x150c000c, 0x401e, 4);
 }
 
 static char *get_engine150c_state(Object *obj, Error **errp)
@@ -12202,6 +12785,7 @@ static bool engine1518_write(NikonZ9State *s, hwaddr addr, uint64_t value,
     if (off == 0x14 && value <= 1) {
         if (value) {
             if (s->capture_nv16_model && i == 0) { capture_nv16_cancel(s); }
+            if (s->video_source_ram_model && i == 2) { s->video_source_ram_row = 0; }
             if (s->raw_pipeline_151c_completion_model && i == 2 &&
                 (e->pending & 0x08100000)) {
                 e->stream_cancelled++;
@@ -12821,8 +13405,18 @@ static char *get_engine151_raw_output_state(Object *obj, Error **errp)
 }
 
 static void engine15e2_deferred_input_notify(NikonZ9State *s);
+static void engine1540_wait_try(NikonZ9State *s);
+static void engine1540_wait_cancel(NikonZ9State *s)
+{
+    for (unsigned bank=0;bank<2;bank++) {
+        if (!s->engine1540_waiting[bank]) { continue; }
+        s->engine1540_waiting[bank]=false;s->engine1540_wait_failed[bank]=false;
+        s->engine1540_wait_cancels[bank]++;
+    }
+}
 
-static bool engine151_capture_pixels(NikonZ9State *s, unsigned i)
+static bool engine153_future_source(NikonZ9State *s, uint64_t source);
+static bool engine151_capture_pixels(NikonZ9State *s, unsigned i, bool validate_only)
 {
     const uint32_t *c = s->engine151_config[i];
     unsigned iw = c[0x400 / 4] & 0x3fff, ih = c[0x400 / 4] >> 16;
@@ -12836,8 +13430,12 @@ static bool engine151_capture_pixels(NikonZ9State *s, unsigned i)
     uint64_t uvaddr = c[0x9c0 / 4] | ((uint64_t)c[0x9c4 / 4] << 32);
     uint64_t inbytes = (uint64_t)pitch * ih, plane = (uint64_t)stride * oh;
     if (i != 0 || s->engine151_pending[i] || !s->primary_d980_frames ||
-        s->engine151_capture_consumed_frame == s->primary_d980_frames ||
-        source != s->primary_d980_last_physical ||
+        (!validate_only && s->engine151_capture_consumed_frame == s->primary_d980_frames) ||
+        /* Validation may precede the submitted producer. The queue then
+         * binds the matching153 bank; actual processing still requires its
+         * new completed DMA at this exact physical source. */
+        (source != s->primary_d980_last_physical &&
+         (!validate_only || !engine153_future_source(s,source))) ||
         c[0x200 / 4] != 0x10000 || c[0x204 / 4] || c[0x60 / 4] || c[0x64 / 4] ||
         c[0x218 / 4] != 1 || (c[0x21c / 4] != 1 && c[0x21c / 4] != 3) || c[0x220 / 4] != 19 ||
         !iw || !ih || !ow || !oh || ((iw | ih | ow | oh | cx | cy | stride) & 1) ||
@@ -12858,6 +13456,7 @@ static bool engine151_capture_pixels(NikonZ9State *s, unsigned i)
     bool raw_side = c[0x21c / 4] == 3;
     uint64_t raw_out = c[0x4c0 / 4] | ((uint64_t)c[0x4c4 / 4] << 32);
     if (raw_side && !engine151_raw_output_ready(s, i, source, inbytes, yaddr, uvaddr, plane)) { return false; }
+    if (validate_only) { return true; }
     /* Consume the actual completed guest RAM, never the host input/cache.
      * Validate both complete output spans before touching either plane. */
     uint8_t *input = g_malloc(inbytes), *pixels = g_malloc(plane * 2);
@@ -12908,6 +13507,19 @@ static bool engine151_capture_pixels(NikonZ9State *s, unsigned i)
         s->engine151_raw_output_jobs++; s->engine151_raw_output_bytes += inbytes;
         s->engine151_raw_output_target = raw_out; s->engine151_raw_output_source = source;
         s->engine151_raw_output_frame = s->primary_d980_frames;
+        if (s->engine1540_lossless14_model) {
+            uint64_t hash=UINT64_C(14695981039346656037);
+            for (uint64_t j=0;j<inbytes;j++) { hash=(hash^input[j])*UINT64_C(1099511628211); }
+            /* A new actual producer retires all overlapping old surfaces.
+             * Store ownership metadata only; encoder still reads real RAM. */
+            for (unsigned j=0;j<ARRAY_SIZE(s->engine151_owned_raw);j++) {
+                Ex7OwnedRaw *old=&s->engine151_owned_raw[j];
+                if (old->frame && raw_out<old->address+old->bytes && old->address<raw_out+inbytes) { old->frame=0; }
+            }
+            Ex7OwnedRaw *owned=&s->engine151_owned_raw[s->engine151_owned_raw_cursor++%64];
+            *owned=(Ex7OwnedRaw){.address=raw_out,.bytes=inbytes,.frame=s->primary_d980_frames,
+                .hash=hash,.geometry=c[0x4a0/4],.pitch=pitch,.acknowledged=false};
+        }
     }
     g_free(input); g_free(pixels);
     s->engine151_green_samples = (uint64_t)(ow / 2) * (oh / 2);
@@ -12933,6 +13545,69 @@ static bool engine151_capture_pixels(NikonZ9State *s, unsigned i)
         " bytes=%" PRIu64 " geometry=%ux%u crop=%u,%u stride=%u; simplified RGGB NV16\n",
         source, yaddr, uvaddr, plane * 2, ow, oh, cx, cy, stride);
     return true;
+}
+
+/* Native599 queues1510 downstream of the already queued153 RAW consumer.
+ * Both geometry and current source ownership must be known. No general
+ * arbitrary-address wait, inferred input, or immediate completion is allowed. */
+static bool engine151_capture_queue(NikonZ9State *s)
+{
+    uint32_t *c=s->engine151_config[0];
+    uint64_t source=c[0x900/4] | ((uint64_t)c[0x904/4]<<32);
+    if (!s->engine153_deferred_input_model || !s->engine153_inplace_identity_model ||
+        s->engine151_capture_waiting ||
+        s->engine151_capture_consumed_frame!=s->primary_d980_frames ||
+        !engine151_capture_pixels(s,0,true)) { return false; }
+    int selected=-1;
+    for (unsigned bank=0;bank<2;bank++) {
+        uint32_t *upstream=s->engine153_config[bank];
+        uint64_t input=upstream[0xb4/4] | ((uint64_t)upstream[0xb0/4]<<32);
+        if (!s->engine153_waiting[bank] || s->engine153_wait_failed[bank] ||
+            s->engine153_wait_after[bank]!=s->primary_d980_frames || input!=source) { continue; }
+        if (selected>=0) { return false; }
+        selected=bank;
+    }
+    if (selected<0) { return false; }
+    s->engine151_capture_wait_bank=selected;
+    s->engine151_capture_wait_after=s->primary_d980_frames;
+    s->engine151_capture_waiting=true;s->engine151_capture_wait_failed=false;
+    s->engine151_capture_wait_requests++;
+    return true;
+}
+
+static void engine151_capture_wait_cancel(NikonZ9State *s, unsigned i)
+{
+    if (!i) { engine1540_wait_cancel(s); }
+    if (!i && s->engine151_capture_waiting) {
+        s->engine151_capture_waiting=false;s->engine151_capture_wait_failed=false;
+        s->engine151_capture_wait_cancels++;
+    }
+}
+
+static void engine151_capture_wait_try(NikonZ9State *s)
+{
+    unsigned bank=s->engine151_capture_wait_bank;
+    if (!s->engine151_capture_waiting || s->engine151_capture_wait_failed ||
+        !s->engine151_active[0] || s->primary_d980_frames<=s->engine151_capture_wait_after ||
+        s->engine153_consumed_dma_frame[bank]!=s->primary_d980_frames ||
+        s->engine153_waiting[bank]) { return; }
+    if (!engine151_capture_pixels(s,0,false)) {
+        s->engine151_capture_wait_failed=true;return;
+    }
+    s->engine151_capture_waiting=false;s->engine151_capture_wait_completions++;
+    s->engine151_active[0]=false;
+    engine151_update_irq(s,0);
+}
+
+static char *get_engine151_capture_wait_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"waiting\":%s,\"failed\":%s,\"bank\":%u,"
+        "\"after_frame\":%" PRIu64 ",\"requests\":%" PRIu64 ",\"completions\":%" PRIu64
+        ",\"cancels\":%" PRIu64 ",\"physical_timing_verified\":false}",
+        s->engine151_capture_waiting?"true":"false",s->engine151_capture_wait_failed?"true":"false",
+        s->engine151_capture_wait_bank,s->engine151_capture_wait_after,s->engine151_capture_wait_requests,
+        s->engine151_capture_wait_completions,s->engine151_capture_wait_cancels);
 }
 
 static bool get_engine151_capture_pixels_model(Object *obj, Error **errp)
@@ -13024,10 +13699,22 @@ static bool video_secondary_isp_ready(NikonZ9State *s)
  * source after the old compressed receiver/decoder have been retired.
  * Each new source-clock input has distinct ownership. This is an authored
  * sensor-to-ISP approximation, not a physical NR/DSP topology claim. */
+/* Functional fan-out of one declared sensor frame. Buffers and ACKs
+ * remain independently owned, but a configured RAW receiver and ISP1 must
+ * receive the same admitted source epoch. Releasing only the ISP output does
+ * not authorize additional frames without a new RAW input. A retired RAW
+ * receiver leaves the existing independent sensor route unchanged. Physical
+ * fan-out timing is unmeasured; no firmware version or task state is used. */
+static bool video_secondary_parallel_route(NikonZ9State *s)
+{
+    return s->video_secondary_parallel_model && s->video_raw_queued_input_model &&
+        !s->engine1530_active && !s->video_raw_frame_ready;
+}
 static bool video_secondary_sensor_route(NikonZ9State *s)
 {
     return s->video_secondary_sensor_model && video_secondary_isp_ready(s) &&
-        !s->engine152c_stream_requested && !s->engine1530_active;
+        !s->engine1530_active && (!s->engine152c_stream_requested ||
+                                      video_secondary_parallel_route(s));
 }
 static void video_secondary_sensor_cancel(NikonZ9State *s)
 {
@@ -13040,11 +13727,19 @@ static bool video_secondary_sensor_receive(NikonZ9State *s)
     if (!video_secondary_sensor_route(s) || !video_raw_descriptor(s) ||
         !s->event_timing_active || s->primary_reset_stage ||
         !(s->engine150c_active&0x4000) || (s->engine_150c_init[0x18/4]&0x4000) ||
-        s->video_raw_packet_owned || s->video_raw_frame_ready || s->video_secondary_sensor_ready ||
+        (s->video_raw_packet_owned && !video_secondary_parallel_route(s)) ||
+        s->video_raw_frame_ready || s->video_secondary_sensor_ready ||
         !s->engine1518[2].config[0x30/4] ||
         (s->engine151_pending[1]&8) || (s->engine1518[2].pending&0x08100000) ||
         (s->video_secondary_source_end_model && (s->engine1518[2].pending&0x20000000)) ||
         s->engine1542_pending[1] || s->engine1542_pending[10] || s->engine1542_pending[11]) {
+        return false;
+    }
+    bool paired=s->engine152c_stream_requested && video_secondary_parallel_route(s);
+    if (paired && (!s->video_raw_packet_owned ||
+                   s->video_secondary_parallel_epoch>=s->video_raw_epoch ||
+                   s->video_raw_source_width!=(s->primary_d980_latched[1]>>16) ||
+                   s->video_raw_source_height!=(s->primary_d980_latched[2]>>16))) {
         return false;
     }
     unsigned width=s->primary_d980_latched[1]>>16,height=s->primary_d980_latched[2]>>16;
@@ -13070,10 +13765,21 @@ static bool video_secondary_sensor_receive(NikonZ9State *s)
         g_free(s->video_secondary_sensor_sha256);s->video_secondary_sensor_sha256=digest;
         for (unsigned ch=0;ch<3;ch++) { g_free(s->raw_pipeline_cache[ch]);s->raw_pipeline_cache[ch]=NULL; }
     }
+    if (paired) { s->video_secondary_parallel_epoch=s->video_raw_epoch; }
     s->video_secondary_sensor_epoch++;
     s->video_secondary_sensor_bytes+=(uint64_t)width*height*2;
     s->video_secondary_sensor_ready=true;
     return true;
+}
+static bool get_video_secondary_parallel_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_secondary_parallel_model; }
+static void set_video_secondary_parallel_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"parallel secondary input immutable after realization");return;
+    }
+    s->video_secondary_parallel_model=value;
 }
 static bool get_video_secondary_sensor_model(Object *obj, Error **errp)
 { return NIKON_Z9_LAB(obj)->video_secondary_sensor_model; }
@@ -13091,13 +13797,21 @@ static char *get_video_secondary_sensor_state(Object *obj, Error **errp)
     char *state=g_strdup_printf("{\"enabled\":%s,\"route\":%s,\"ready\":%s,"
         "\"epoch\":%"PRIu64",\"consumed\":%"PRIu64",\"sample_bytes\":%"PRIu64
         ",\"cancels\":%"PRIu64",\"samples_sha256\":\"%s\","
-        "\"scope\":\"functional declared sensor clock/Bayer source to ISP1 after retired receiver/decoder; independent owned input, no original DSP/ISP or physical topology proof\"}",
+        "\"scope\":\"functional declared sensor clock/Bayer source to ISP1; independent input with stopped decoder, optional parallel receiver; no original DSP/ISP or physical topology proof\"}",
         s->video_secondary_sensor_model?"true":"false",video_secondary_sensor_route(s)?"true":"false",
         s->video_secondary_sensor_ready?"true":"false",s->video_secondary_sensor_epoch,
         s->video_secondary_sensor_consumed,s->video_secondary_sensor_bytes,s->video_secondary_sensor_cancels,
         s->video_secondary_sensor_sha256?s->video_secondary_sensor_sha256:"");
 
     GString *out=g_string_new_len(state,strlen(state)-1);g_free(state);
+    g_string_append_printf(out,",\"parallel_enabled\":%s,\"parallel_route\":%s",
+        s->video_secondary_parallel_model?"true":"false",
+        video_secondary_parallel_route(s)?"true":"false");
+    g_string_append_printf(out,",\"parallel_packet_epoch\":%"PRIu64
+        ",\"parallel_waiting_for_packet\":%s",s->video_secondary_parallel_epoch,
+        (s->engine152c_stream_requested && video_secondary_parallel_route(s) &&
+         (!s->video_raw_packet_owned || s->video_secondary_parallel_epoch>=s->video_raw_epoch))
+         ?"true":"false");
     g_string_append_printf(out,",\"gates\":{\"descriptor\":%s,\"clock\":%s,\"primary_reset\":%u,"
         "\"primary_active\":%u,\"primary_hold\":%u,\"packet_owned\":%s,\"decoded_owned\":%s,"
         "\"source_gate\":%u,\"isp_pending\":%u,\"source_pending\":%u,\"headers\":[%u,%u,%u]}}",
@@ -13144,14 +13858,47 @@ static void set_video_primary_boundaries_model(Object *obj, bool value, Error **
     }
     s->video_primary_boundaries_model=value;
 }
+/* Original source2 wakes preparation, before processed output/source3.
+ * Native668 rejected the earlier compressed-packet boundary: that is not
+ * yet the admitted uncompressed input. Only the currently selected video
+ * route may announce its actual CRC-decoded RAW or complete sensor sample.
+ * Distinct input owners retain independent epochs across route changes.
+ * No output, software flag, decoder completion or physical timing implied. */
+static void video_primary_input_boundary_tick(NikonZ9State *s, bool sensor)
+{
+    if (!s->video_primary_input_boundary_model) { return; }
+    bool ready=sensor ? s->video_secondary_sensor_ready : s->video_raw_frame_ready;
+    const NikonRawPixels *pixels=sensor ? s->video_secondary_sensor_pixels : s->video_raw_pixels;
+    uint64_t epoch=sensor ? s->video_secondary_sensor_epoch : s->video_raw_decoded_epoch;
+    uint64_t *seen=sensor ? &s->video_primary_sensor_input_epoch : &s->video_primary_decoded_input_epoch;
+    if (!ready || !pixels || !epoch || *seen==epoch) { return; }
+    *seen=epoch;s->video_primary_input_epoch=epoch;s->video_primary_input_frames++;
+    s->video_primary_boundaries_pending|=8;
+    engine150c_stop_irq_update(s);
+}
+static bool get_video_primary_input_boundary_model(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->video_primary_input_boundary_model; }
+static void set_video_primary_input_boundary_model(Object *obj, bool value, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"input boundary selection immutable after realization");return;
+    }
+    s->video_primary_input_boundary_model=value;
+}
+
 static char *get_video_primary_boundaries_state(Object *obj, Error **errp)
 {
     NikonZ9State *s=NIKON_Z9_LAB(obj);
     return g_strdup_printf("{\"enabled\":%s,\"pending\":%u,\"mask\":%u,"
+        "\"decoded_input_epoch\":%"PRIu64",\"sensor_input_epoch\":%"PRIu64","
+        "\"separate_input\":%s,\"input_frames\":%"PRIu64",\"input_epoch\":%"PRIu64","
         "\"frames\":%"PRIu64",\"input_acks\":%"PRIu64",\"output_acks\":%"PRIu64
-        ",\"cancels\":%"PRIu64",\"scope\":\"functional combined primary group0 image boundaries after owned internal RAW and six actual Y/UV transfers; native ISR/W1C only; physical staging and original algorithms unverified\"}",
+        ",\"cancels\":%"PRIu64",\"scope\":\"functional primary input/output boundaries: combined default or independent owned uncompressed RAW; output requires six actual Y/UV transfers; native ISR/W1C only; physical timing and original algorithms unverified\"}",
         s->video_primary_boundaries_model?"true":"false",s->video_primary_boundaries_pending,
-        s->engine_150c_init[0x200/4],s->video_primary_boundaries_frames,
+        s->engine_150c_init[0x200/4],s->video_primary_decoded_input_epoch,s->video_primary_sensor_input_epoch,
+        s->video_primary_input_boundary_model?"true":"false",
+        s->video_primary_input_frames,s->video_primary_input_epoch,s->video_primary_boundaries_frames,
         s->video_primary_input_acks,s->video_primary_output_acks,s->video_primary_boundaries_cancels);
 }
 
@@ -13200,7 +13947,7 @@ static char *get_video_source_end_state(Object *obj, Error **errp)
     NikonZ9State *s=NIKON_Z9_LAB(obj);
     return g_strdup_printf("{\"enabled\":%s,\"group_transfers\":%u,\"ends\":%"PRIu64
         ",\"acks\":%"PRIu64",\"cancels\":%"PRIu64",\"pending\":%u,"
-        "\"scope\":\"experimental source0 group after three actual RAW/ISP transfers; native client unverified, failed native experiment, current recipes disable it\"}",
+        "\"scope\":\"functional source0 group after three actual RAW/ISP transfers; original client/W1C own delivery; physical framing and original algorithms unverified\"}",
         s->video_source_end_model?"true":"false",s->video_source_group_transfers,
         s->video_source_group_ends,s->video_source_group_acks,s->video_source_group_cancels,
         s->engine1518[0].pending&0x20000000);
@@ -13253,14 +14000,15 @@ static bool engine151_write(NikonZ9State *s, hwaddr addr, uint64_t value,
             goto invalid;
         }
         bool video = engine151_video_ready(s, i);
-        if (s->engine151_capture_pixels_model && i == 0 && !video && !engine151_capture_pixels(s, i)) {
+        if (s->engine151_capture_pixels_model && i == 0 && !video &&
+            !engine151_capture_pixels(s,i,false) && !engine151_capture_queue(s)) {
             goto invalid;
         }
         memcpy(s->engine151_latched[i], s->engine151_config[i], sizeof(s->engine151_latched[i]));
         s->engine151_latched_parameter_valid[i]=s->engine151_parameter_valid[i];
         s->engine151_active[i] = true;
         s->engine151_starts[i]++;
-        if (s->engine151_capture_pixels_model && i == 0 && !video) {
+        if (s->engine151_capture_pixels_model && i == 0 && !video && !s->engine151_capture_waiting) {
             /* The finite capture completed both checked RAM writes already.
              * Retire busy before IRQ; preserve issued pending/ACK ownership.
              * The original native worker resets after the completion callback
@@ -13279,6 +14027,7 @@ static bool engine151_write(NikonZ9State *s, hwaddr addr, uint64_t value,
         if (value != 1 || !s->engine151_initializations[i] || s->engine151_hold[i]) {
             goto invalid;
         }
+        engine151_capture_wait_cancel(s,i);
         if (s->engine151_active[i]) {
             s->engine151_active[i] = false;
             s->engine151_stops[i]++;
@@ -13294,6 +14043,7 @@ static bool engine151_write(NikonZ9State *s, hwaddr addr, uint64_t value,
     }
     if (off == 0xc && value == 1) {
         if (i==1 && s->video_secondary_sensor_model) { video_secondary_sensor_cancel(s); }
+        engine151_capture_wait_cancel(s,i);
         if (s->engine151_control_model && s->engine151_active[i]) {
             s->engine151_active[i] = false;
             s->engine151_stops[i]++;
@@ -13309,9 +14059,19 @@ static bool engine151_write(NikonZ9State *s, hwaddr addr, uint64_t value,
     }
     if (off == 0x14 && value == 0x3807f) {
         if (s->engine151_control_model && s->engine151_active[i]) {
-            goto invalid; /* Active reset effects have not been modeled. */
+            /* Native626 resets1510 while its submitted RAW request is still
+             * waiting for153's next real frame. No output transfer has begun.
+             * Cancel that exact owned wait and dependent1540 wait; preserve
+             * upstream153, other engines and RAM. Never turn cancellation
+             * into a pixel completion or a normal STOP acknowledgement. */
+            if (i || !s->engine151_capture_waiting ||
+                s->engine151_capture_pending ||
+                s->engine151_pending[i]) { goto invalid; }
+            engine151_capture_wait_cancel(s,i);
+            s->engine151_active[i] = false;
         }
         if (i == 0 && s->engine151_capture_pixels_model) {
+            engine1540_wait_cancel(s);
             if (s->engine151_capture_pending) { s->engine151_capture_cancels++; }
             s->engine151_capture_pending = false; s->engine151_average_valid = false;
         }
@@ -13349,6 +14109,11 @@ static bool engine151_write(NikonZ9State *s, hwaddr addr, uint64_t value,
         if (s->engine151_capture_pixels_model && i == 0 &&
             s->engine151_capture_pending && (value & 2)) {
             s->engine151_capture_pending = false; s->engine151_capture_acks++;
+            for (unsigned j=0;j<ARRAY_SIZE(s->engine151_owned_raw);j++) {
+                if (s->engine151_owned_raw[j].frame==s->engine151_raw_output_frame) {
+                    s->engine151_owned_raw[j].acknowledged=true;
+                }
+            }
         }
         if (i == 1 && s->raw_pipeline_1514_completion_model &&
             (s->engine151_pending[i] & value & 8)) {
@@ -13358,7 +14123,12 @@ static bool engine151_write(NikonZ9State *s, hwaddr addr, uint64_t value,
             (s->engine151_pending[i] & value & 8)) { s->raw_pipeline_video_acks++; }
         s->engine151_pending[i] &= ~value;
         engine151_update_irq(s, i);
+        if (!i) { engine1540_wait_try(s); }
         return true;
+    }
+    if (!i && s->engine151_capture_waiting && off!=0x40 &&
+        (off>=sizeof(s->engine151_config[0]) || value!=s->engine151_config[0][off/4])) {
+        goto invalid; /* submitted buffers/geometry remain owned until stop or completion */
     }
     uint32_t mask = engine151_mask(i, off);
     if (!mask) {
@@ -13415,6 +14185,7 @@ static const uint32_t engine1542_bases[40] = {
     0x15424800, 0x15424a00, 0x15424c00
 };
 
+#include "nikon-expeed-capture-pool.h"
 #include "nikon-z9-capture-nv16.h"
 
 static int engine1542_instance(NikonZ9State *s, hwaddr addr, unsigned size,
@@ -13534,6 +14305,23 @@ static uint32_t engine1542_mask(unsigned i, unsigned off)
         case 0x60: return i >= 3 ? 0x3fff : 0;
         case 0x6c: return i >= 3 ? 7 : 0;
         case 0x70: return i >= 3 ? 1 : 0;
+        default: return 0;
+        }
+    }
+    if (i == 14) {
+        /* C1.10 original 40e27b5c..40e27c68 packs this complete configuration
+         * transaction. This is the separate15430100 block, NOT the15431000
+         * image-header command bank. Retained words only; no DMA or IRQ. */
+        switch (off) {
+        case 0: return 1; /* original scalar enable; no completion producer */
+        case 4: return 0xf3;
+        case 8: return 0xff;
+        case 0xc: return 0x7f7f;
+        case 0x10: return 0x7ff;
+        case 0x20: case 0x24: case 0x28: case 0x2c: return 0x7ff07ff;
+        case 0x30: return 0x7ff;
+        case 0x40: return 0x1fff1fff;
+        case 0x44: return 0x1fff;
         default: return 0;
         }
     }
@@ -13700,6 +14488,7 @@ static bool capture_stream_can_rearm(NikonZ9State *s, unsigned j)
         s->engine1518[0].pending) {
         return false;
     }
+    if (s->capture_frame_pool_model) { return capture_pool_current_owned(s); }
     for (unsigned k = 0; k < 3; k++) {
         if (s->capture_nv16_jpeg_consumed[k] != s->capture_nv16_jobs) {
             return false;
@@ -13733,7 +14522,7 @@ static char *get_capture_stream_rearm_state(Object *obj, Error **errp)
 
 /* Native509 preserves its own complete header while adjacent source/supplier
  * settings change. Header START is not pixel readiness. This fallback only
- * reuses a previously accepted strict video program with metadata and selected descriptor words equal
+ * reuses a previously accepted strict video program with every own word equal
  * (apart from the original low-two-bit control RMW), no live header/backend
  * owner and no output pending. Original pixel/DMA admission stays unchanged. */
 static bool engine1543_retained_video_start(NikonZ9State *s, unsigned j, uint64_t value)
@@ -13743,7 +14532,7 @@ static bool engine1543_retained_video_start(NikonZ9State *s, unsigned j, uint64_
         j!=1 || value!=0x101 || s->engine1543_active[j] || s->engine1543_held[j] ||
         s->engine1543_valid[j]!=15 || s->engine1543_buffer_valid[j]!=UINT64_C(0x000f000f000f000f) ||
         s->capture_nv16_requested || s->engine1542_pending[11] ||
-        s->video_raw_packet_owned || s->video_raw_frame_ready || s->engine152c_stream_pending ||
+        video_raw_packet_blocks_producer(s) || s->video_raw_frame_ready || s->engine152c_stream_pending ||
         s->engine1530_active || (s->engine1530_config[0x1c/4]&12)) { return false; }
     const uint32_t *c=s->engine1542_config[11],*prior=s->engine1543_latched[j];
     if ((c[1]&~3u)!=0x100 || (prior[1]&~3u)!=0x100 || c[2]!=0x302 || c[3] || c[4]!=0x29) { return false; }
@@ -13867,11 +14656,13 @@ static char *get_engine1543_control_state(Object *obj, Error **errp)
 }
 
 #include "nikon-z9-pixels.h"
+static void engine153_deferred_try(NikonZ9State *s);
 #include "nikon-z9-d980.h"
 #include "nikon-z9-jpeg.h"
 
 
 #include "nikon-z9-thumbnail-nv16.h"
+#include "nikon-expeed-video-preview.h"
 
 static const unsigned engine1542_ram_input_offsets[] = {
     4, 8, 0xc, 0x10, 0x20, 0x24, 0x28, 0x2c,
@@ -13884,6 +14675,8 @@ static bool engine1542_ram_input_ready(NikonZ9State *s)
     unsigned w = c[0x4c / 4], h = c[0x50 / 4], pitch = c[0x38 / 4];
     uint64_t y = capture_nv16_address(c, 0x20), uv = capture_nv16_address(c, 0x28);
     uint64_t n = (uint64_t)pitch * h;
+    int movie = video_preview_source(s,y,uv,w,h,pitch);
+    unsigned sub = movie >= 0 ? s->video_preview_sub[movie] : 1;
     /* Native510's finite RAM-input transaction only. Requiring all source
      * address words distinguishes a missing high word from explicit zero.
      * This checks control admission, not provenance or pixel processing. */
@@ -13893,8 +14686,8 @@ static bool engine1542_ram_input_ready(NikonZ9State *s)
         c[0x40 / 4] == 0x0f000022 && c[0x48 / 4] == 0x11 &&
         w && !(w & 1) && w <= 16384 && h && h <= 8192 &&
         pitch >= w && pitch <= 32768 && c[0x3c / 4] == pitch &&
-        capture_nv16_span(s, y, n) && capture_nv16_span(s, uv, n) &&
-        (y + n <= uv || uv + n <= y);
+        capture_nv16_span(s, y, n) && capture_nv16_span(s, uv, n / sub) &&
+        (!(h % sub)) && (y + n <= uv || uv + n / sub <= y);
 }
 
 static bool engine1542_ram_input_control(NikonZ9State *s, hwaddr addr, uint64_t value)
@@ -13978,6 +14771,12 @@ static bool engine1542_write(NikonZ9State *s, hwaddr addr, uint64_t value,
     if (s->engine1543_control_model && i >= 10 && i < 13 && off == 4) {
         return engine1543_control_write(s, i, addr, value);
     }
+    if (s->video_preview_model && i == 1 && off == 4 && (value & 3) == 1) {
+        if (value != 0x3801 || !video_preview_transfer(s)) {
+            unknown_access(s, addr, value, size, true);
+        }
+        return true;
+    }
     if (s->engine1542_ram_input_model && i == 2 && off == 4) {
         if ((value & 3) == 1 || (value & 3) == 0) {
             return engine1542_ram_input_control(s, addr, value);
@@ -13999,6 +14798,14 @@ static bool engine1542_write(NikonZ9State *s, hwaddr addr, uint64_t value,
         return true;
     }
     s->engine1542_config[i][off / 4] = value;
+    video_preview_written(s, i, off);
+    if (s->video_main_model && i==10 && off>=0x200 && off<0x600 &&
+        (off&0x7f)>=0x40 && (off&0x7f)<0x50) {
+        unsigned bank=(off-0x200)/0x200;
+        unsigned bit=(((off-0x200)&0x1ff)/0x80)*4+((off&0x7f)-0x40)/4;
+        s->video_main_valid[bank]|=1U<<bit;
+        s->video_main_written[bank]|=1U<<bit;
+    }
     if (s->engine1542_ram_input_model && i == 2) {
         for (unsigned j = 0; j < ARRAY_SIZE(engine1542_ram_input_offsets); j++) {
             if (off == engine1542_ram_input_offsets[j]) { s->engine1542_ram_input_valid |= 1u << j; }
@@ -14241,7 +15048,26 @@ static void engine153_irq_update(NikonZ9State *s, unsigned bank)
     }
 }
 
-static bool engine153_frame_pass(NikonZ9State *s, unsigned bank)
+/* Native606 submits another physical buffer while the previous bank still
+ * awaits input. Admission may name a fully submitted D980 slot, but completion
+ * below still requires a new actual DMA to that exact physical address. */
+static bool engine153_future_source(NikonZ9State *s, uint64_t source)
+{
+    const uint32_t *d=s->primary_d980_submitted;
+    if (!s->engine153_deferred_input_model || !s->primary_d980_submits ||
+        d[7]>1 || d[0]!=s->primary_d980_cache_format ||
+        (d[1]>>16)!=s->primary_d980_cache_width ||
+        (d[2]>>16)!=s->primary_d980_cache_height ||
+        d[4]!=s->primary_d980_cache_stride) { return false; }
+    for (unsigned slot=0;slot<4;slot++) {
+        unsigned at=12+d[7]*8+slot*2;
+        uint64_t encoded=d[at] | ((uint64_t)d[at+1]<<32);
+        if (encoded==source+UINT64_C(0x400000000)) { return true; }
+    }
+    return false;
+}
+
+static bool engine153_frame_pass(NikonZ9State *s, unsigned bank, bool validate_only)
 {
     uint32_t *c = s->engine153_config[bank];
     uint64_t program = c[0x48 / 4] | ((uint64_t)c[0x4c / 4] << 32);
@@ -14257,10 +15083,11 @@ static bool engine153_frame_pass(NikonZ9State *s, unsigned bank)
         c[0x78 / 4] || c[0x7c / 4] || c[0x80 / 4] ||
         c[0x98 / 4] || c[0x9c / 4] || c[0xa0 / 4] ||
         !s->primary_d980_frames || !s->primary_d980_cache ||
-        s->engine153_consumed_dma_frame[bank] == s->primary_d980_frames ||
+        (!validate_only && (s->engine153_consumed_dma_frame[bank] == s->primary_d980_frames ||
         (s->engine153_alternate_bank_model &&
-         MAX(s->engine153_consumed_dma_frame[0], s->engine153_consumed_dma_frame[1]) == s->primary_d980_frames) ||
-        source != s->primary_d980_last_physical || (program & 31) ||
+         MAX(s->engine153_consumed_dma_frame[0], s->engine153_consumed_dma_frame[1]) == s->primary_d980_frames))) ||
+        (source != s->primary_d980_last_physical &&
+         (!validate_only || !engine153_future_source(s,source))) || (program & 31) ||
         program < UINT64_C(0xa00000000) || program >= UINT64_C(0xa40000000) ||
         !dma_ram_range(s, program, sizeof(descriptor)) ||
         address_space_read(&address_space_memory, program, MEMTXATTRS_UNSPECIFIED,
@@ -14281,6 +15108,7 @@ static bool engine153_frame_pass(NikonZ9State *s, unsigned bank)
         !dma_ram_range(s, source, bytes) || !dma_ram_range(s, target, bytes) ||
         (!s->engine153_inplace_identity_model &&
          target < source + bytes && source < target + bytes)) { return false; }
+    if (validate_only) { return true; }
     /* Neutral algorithm approximation: retain every input pixel and padding
      * byte. Internal pyramid/scratch results are intentionally unsupported.
      * Consume RAM produced by actual D980, not the host source/cache. */
@@ -14309,6 +15137,78 @@ static bool engine153_frame_pass(NikonZ9State *s, unsigned bank)
     return true;
 }
 
+
+/* One outstanding future-frame request per bank. Config and descriptor are
+ * frozen until completion or explicit control-clear cancellation. This is a
+ * functional producer/consumer timing model, not measured silicon timing. */
+static bool engine153_deferred_queue(NikonZ9State *s, unsigned bank)
+{
+    uint32_t *c=s->engine153_config[bank];
+    uint64_t program=c[0x48/4] | ((uint64_t)c[0x4c/4]<<32);
+    if (!s->engine153_deferred_input_model || s->engine153_waiting[bank] ||
+        !engine153_frame_pass(s,bank,true)) { return false; }
+    if (address_space_read(&address_space_memory,program,MEMTXATTRS_UNSPECIFIED,
+        s->engine153_wait_descriptor[bank],0x7c0)!=MEMTX_OK) { return false; }
+    s->engine153_waiting[bank]=true;s->engine153_wait_failed[bank]=false;
+    s->engine153_wait_after[bank]=s->primary_d980_frames;
+    s->engine153_wait_requests[bank]++;
+    return true;
+}
+
+static void engine153_deferred_try(NikonZ9State *s)
+{
+    if (!s->engine153_deferred_input_model) { return; }
+    for (unsigned bank=0;bank<2;bank++) {
+        uint32_t *c=s->engine153_config[bank];
+        if (!s->engine153_waiting[bank] || s->engine153_wait_failed[bank] ||
+            s->primary_d980_frames<=s->engine153_wait_after[bank] ||
+            MAX(s->engine153_consumed_dma_frame[0],s->engine153_consumed_dma_frame[1])==s->primary_d980_frames) { continue; }
+        /* Another bank's new frame must neither satisfy nor fail this
+         * request. Each admitted buffer retains ownership until its own DMA. */
+        uint64_t source=c[0xb4/4] | ((uint64_t)c[0xb0/4]<<32);
+        if (source!=s->primary_d980_last_physical) { continue; }
+        uint8_t descriptor[0x7c0];
+        uint64_t program=c[0x48/4] | ((uint64_t)c[0x4c/4]<<32);
+        if (address_space_read(&address_space_memory,program,MEMTXATTRS_UNSPECIFIED,
+            descriptor,sizeof(descriptor))!=MEMTX_OK ||
+            memcmp(descriptor,s->engine153_wait_descriptor[bank],sizeof(descriptor))) {
+            s->engine153_wait_failed[bank]=true;continue;
+        }
+        c[1]=0;
+        bool done=engine153_frame_pass(s,bank,false);
+        c[1]=1;
+        if (!done) { s->engine153_wait_failed[bank]=true;continue; }
+        s->engine153_waiting[bank]=false;s->engine153_wait_completions[bank]++;
+        engine153_irq_update(s,bank);
+    }
+    engine151_capture_wait_try(s);
+}
+
+static bool get_engine153_deferred_input(Object *obj, Error **errp)
+{ return NIKON_Z9_LAB(obj)->engine153_deferred_input_model; }
+
+static void set_engine153_deferred_input(Object *obj,bool value,Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    if (s->image_ram.ram || s->image_ram.rom_device) {
+        error_setg(errp,"engine153-deferred-input-model is immutable after realization");return;
+    }
+    s->engine153_deferred_input_model=value;
+}
+
+static char *get_engine153_deferred_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);GString *out=g_string_new(NULL);
+    g_string_append_printf(out,"{\"enabled\":%s,\"physical_timing_verified\":false,\"banks\":[",
+        s->engine153_deferred_input_model ? "true":"false");
+    for (unsigned b=0;b<2;b++) {
+        g_string_append_printf(out,"%s{\"waiting\":%s,\"failed\":%s,\"after_frame\":%" PRIu64
+            ",\"requests\":%" PRIu64 ",\"completions\":%" PRIu64 ",\"cancels\":%" PRIu64 "}",
+            b ? ",":"",s->engine153_waiting[b] ? "true":"false",s->engine153_wait_failed[b] ? "true":"false",
+            s->engine153_wait_after[b],s->engine153_wait_requests[b],s->engine153_wait_completions[b],s->engine153_wait_cancels[b]);
+    }
+    g_string_append(out,"]}");return g_string_free(out,false);
+}
 
 static bool get_engine153_alternate_bank_model(Object *obj, Error **errp)
 {
@@ -14597,7 +15497,7 @@ static bool video_processing_word(unsigned off)
 }
 static bool video_processing_input_idle(NikonZ9State *s)
 {
-    return !(s->engine150c_active&0xc000) && !s->video_raw_packet_owned && !s->video_raw_frame_ready &&
+    return !(s->engine150c_active&0xc000) && !video_raw_packet_blocks_producer(s) && !s->video_raw_frame_ready &&
         !s->engine152c_stream_requested && !s->engine152c_stream_pending && !s->engine1530_active &&
         !s->video_backend_drain_requested[0] && !s->video_backend_drain_requested[1] &&
         !s->video_backend_drain_done[0] && !s->video_backend_drain_done[1] &&
@@ -14729,17 +15629,35 @@ static bool video_nr_fresh_release(NikonZ9State *s, hwaddr addr, uint64_t value,
     }
     return true;
 }
+/* An untouched, released port owns neither descriptors nor work. Reset
+ * only its latch; upstream packets and the other NR port remain independent.
+ * A partially configured or active target must use the existing drain path. */
+static bool video_nr_empty_assert(NikonZ9State *s, hwaddr addr,
+                                  uint64_t value, unsigned size)
+{
+    if (!s->video_initial_reset_model || addr!=0x0d154348 || size!=4 ||
+        !value || (value&~UINT64_C(0x01800000)) ||
+        (s->peripheral_release8 & value)!=value) { return false; }
+    for (unsigned p=0;p<2;p++) {
+        if (!(value & (UINT32_C(0x00800000)<<p))) { continue; }
+        for (unsigned w=0;w<ARRAY_SIZE(s->video_processing_ports[p]);w++) {
+            if (s->video_processing_ports[p][w]) { return false; }
+        }
+    }
+    return true;
+}
 static bool video_nr_reset_access(NikonZ9State *s, hwaddr addr,
                                   uint64_t value, unsigned size)
 {
     if (!s->video_nr_reset_model || (addr!=0x0d154248 && addr!=0x0d154348) ||
         !(value&UINT64_C(0x01800000))) { return false; }
     bool fresh = video_nr_fresh_release(s, addr, value, size);
+    bool empty_assert = video_nr_empty_assert(s, addr, value, size);
     bool target_active = s->video_initial_reset_model &&
         (((value & 0x800000) && s->video_processing_ports[0][0]) ||
          ((value & 0x1000000) && s->video_processing_ports[1][0]));
-    if (size!=4 || !value || (value&~UINT64_C(0x01800000)) || target_active || (!fresh && (
-        (s->engine150c_active&0xc000) || s->video_raw_packet_owned || s->video_raw_frame_ready ||
+    if (size!=4 || !value || (value&~UINT64_C(0x01800000)) || target_active || ((!fresh && !empty_assert) && (
+        (s->engine150c_active&0xc000) || video_raw_packet_blocks_producer(s) || s->video_raw_frame_ready ||
         s->engine152c_stream_requested || s->engine152c_stream_pending || s->engine1530_active ||
         s->video_backend_drain_requested[0] || s->video_backend_drain_requested[1] ||
         s->video_backend_drain_done[0] || s->video_backend_drain_done[1] ||
@@ -14835,13 +15753,17 @@ static bool video_backend_drain_control(NikonZ9State *s, hwaddr addr,
     unsigned i=addr==0x1530000c;
     uint32_t *c=i ? s->engine1530_config : s->engine152c_config[0];
     bool active=i ? s->engine1530_active : s->engine152c_stream_requested;
+    /* Native676 disables this real endpoint before hold/STOP, while ISP1
+     * still receives the sensor. The local enable0 fences this receiver,
+     * not the entire sensor. A reset/never-started port has no such token. */
+    bool local_fence=s->video_backend_locally_disabled[i] && !active && !c[8/4];
     bool source_held=!(s->engine150c_active&0x4000) || (s->engine_150c_init[0x18/4]&0x4000);
     /* Native501 stops a real, active receiver after primary reset retires
      * its D980 descriptor. That descriptor admits new RAW frames; it does
      * not own backend STOP. Preserve the known active endpoint, hold,
      * producer fence, duplicate and actual packet/data/end retirement. */
     if (!s->bootstrap_fixtures || !s->video_raw_transport_model || size!=4 || value!=1 ||
-        c[0x404/4]!=1 || !active || !source_held ||
+        c[0x404/4]!=1 || (!active && !local_fence) || (!source_held && !local_fence) ||
         s->video_backend_drain_requested[i] || s->video_backend_drain_done[i]) {
         s->video_backend_reject_valid=true;s->video_backend_reject_port=i;
         s->video_backend_reject_size=size;s->video_backend_reject_value=value;
@@ -14858,8 +15780,9 @@ static bool video_backend_drain_control(NikonZ9State *s, hwaddr addr,
     }
     s->video_backend_drain_requested[i]=true;s->video_backend_drain_requests[i]++;
     c[0xc/4]=1;c[8/4]=0;
-    if (i) { s->engine1530_active=false;s->engine1530_stops++; }
-    else { s->engine152c_stream_requested=false;s->engine152c_stream_cancels++; }
+    s->video_backend_locally_disabled[i]=false;
+    if (i && active) { s->engine1530_active=false;s->engine1530_stops++; }
+    else if (!i && active) { s->engine152c_stream_requested=false;s->engine152c_stream_cancels++; }
     return true;
 }
 static void video_backend_drain_tick(NikonZ9State *s)
@@ -14867,7 +15790,7 @@ static void video_backend_drain_tick(NikonZ9State *s)
     if (!s->video_backend_drain_model) { return; }
     for (unsigned i=0;i<2;i++) {
         uint32_t *pending=i ? &s->engine1530_config[0x1c/4] : &s->engine152c_stream_pending;
-        bool owned=i ? s->video_raw_frame_ready : s->video_raw_packet_owned;
+        bool owned=i ? s->video_raw_frame_ready : video_raw_packet_blocks_producer(s);
         if (!s->video_backend_drain_requested[i] || s->video_backend_drain_done[i] ||
             owned || (*pending&(4|8))) { continue; }
         uint32_t *c=i ? s->engine1530_config : s->engine152c_config[0];
@@ -14908,7 +15831,7 @@ static char *get_video_backend_drain_state(Object *obj, Error **errp)
         "\"last_rejection\":{\"valid\":%s,\"port\":%u,\"size\":%u,\"value\":%" PRIu64
         ",\"descriptor_ready\":%s,\"active\":%s,\"source_active\":%u,\"source_hold\":%u,\"hold\":%u,"
         "\"owned\":%s,\"pending\":%u,\"requested\":%s,\"done\":%s},"
-        "\"scope\":\"known active backend STOP independent of retired producer descriptor; actual packet/data/end owners retained; no guest wait edits\"}",
+        "\"scope\":\"known active or explicitly disabled backend STOP; local hold fences its own producer; actual packet/data/end owners retained; no guest wait edits\"}",
         s->video_backend_reject_valid ? "true" : "false",s->video_backend_reject_port,
         s->video_backend_reject_size,s->video_backend_reject_value,
         s->video_backend_reject_descriptor ? "true" : "false",s->video_backend_reject_active ? "true" : "false",
@@ -14942,8 +15865,9 @@ static bool engine1530_stream_control(NikonZ9State *s, hwaddr addr,
         if (s->engine1530_active || s->engine1530_config[0x404/4] ||
             !s->engine1530_config[0x14/4] || !s->engine15b0_config[0x38/4] ||
             !s->video_peripheral_latched || s->video_peripheral_pending) { goto invalid; }
-        s->engine1530_active=true;s->engine1530_starts++;
+        s->engine1530_active=true;s->engine1530_starts++;s->video_backend_locally_disabled[1]=false;
     } else if (s->engine1530_active) {
+        s->video_backend_locally_disabled[1]=true;
         s->engine1530_active=false;s->engine1530_stops++;
     }
     s->engine1530_config[8/4]=value;return true;
@@ -15027,6 +15951,7 @@ static bool engine1530_config_write(NikonZ9State *s, hwaddr addr,
         (!core && value && ((off == 4 && !held) || off == 8))) {
         unknown_access(s, addr, value, size, true); return true;
     }
+    if (!core && off == 4 && value) { s->video_backend_locally_disabled[1]=false; }
     if (!core && off == 0x1c) {
         video_backend_drain_ack(s,1,value);
         /* Original ISR reads and W1C clears this word. Empty init owns no
@@ -15117,10 +16042,60 @@ static bool engine153_config_write(NikonZ9State *s, hwaddr addr,
 {
     unsigned bank, off; uint32_t mask;
     if (!engine153_config_register(s, addr, &bank, &off, &mask)) { return false; }
+    /* Original ZR40e286a0: hold14=3, hold18=3, pulse0=1/0,
+     * release14=0, release18=0. Reset cancels this port's outstanding
+     * promise/completion; it never processes pixels or executes W1C.
+     * Preserve the other port, downstream owners and all image RAM. */
+    if (s->primary_reset_queued_start_model && s->engine153_deferred_input_model &&
+        (s->engine153_cancel_reset_stage[bank] ||
+         ((s->engine153_waiting[bank] || s->engine153_pending[bank]) && off==0x14 && value==3))) {
+        static const unsigned offsets[]={0x14,0x18,0,0,0x14,0x18};
+        static const unsigned values[]={3,3,1,0,0,0};
+        unsigned stage=s->engine153_cancel_reset_stage[bank];
+        if (size!=4 || stage>=6 || off!=offsets[stage] || value!=values[stage]) { goto invalid; }
+        s->engine153_config[bank][off/4]=value;
+        s->engine153_config_writes[bank]++;
+        if (stage==2) {
+            if (s->engine153_waiting[bank]) {
+                s->engine153_waiting[bank]=false;
+                s->engine153_wait_failed[bank]=false;
+                s->engine153_wait_cancels[bank]++;
+            }
+            s->engine153_pending[bank]=0;
+            s->engine153_config[bank][1]=0;
+            s->engine153_reset_pulses[bank]++;
+            engine153_irq_update(s,bank);
+        }
+        s->engine153_cancel_reset_stage[bank]=(stage+1)%6;
+        return true;
+    }
     if ((s->engine153_frame_pass_model || s->engine153_inplace_identity_model) && (off == 4 || off == 0x2c)) {
         if (size != 4 || value > 1) { goto invalid; }
         if (off == 4) {
-            if (value && !engine153_frame_pass(s, bank)) { goto invalid; }
+            if (value && !engine153_frame_pass(s,bank,false) &&
+                !engine153_deferred_queue(s,bank)) {
+                const uint32_t *c=s->engine153_config[bank];
+                uint64_t source=c[0xb4/4] | ((uint64_t)c[0xb0/4]<<32);
+                fprintf(stderr,"Z9_153_ADMISSION_REJECT bank=%u source=%"PRIx64
+                    " last=%"PRIx64" frames=%"PRIu64" consumed=%"PRIu64",%"PRIu64
+                    " cache=%u,%u,%u,%u future=%u waiting=%u pending=%u control=%u"
+                    " submits=%"PRIu64" submitted=",
+                    bank,source,s->primary_d980_last_physical,s->primary_d980_frames,
+                    s->engine153_consumed_dma_frame[0],s->engine153_consumed_dma_frame[1],
+                    s->primary_d980_cache_format,s->primary_d980_cache_width,
+                    s->primary_d980_cache_height,s->primary_d980_cache_stride,
+                    engine153_future_source(s,source),s->engine153_waiting[bank],
+                    s->engine153_pending[bank],c[1],s->primary_d980_submits);
+                for (unsigned n=0;n<28;n++) {
+                    fprintf(stderr,"%s%x",n ? ",":"",s->primary_d980_submitted[n]);
+                }
+                fprintf(stderr,"\n");
+                goto invalid;
+            }
+            if (!value && s->engine153_waiting[bank]) {
+                s->engine153_waiting[bank]=false;s->engine153_wait_failed[bank]=false;
+                s->engine153_wait_cancels[bank]++;
+            }
             s->engine153_config[bank][1] = value;
         } else {
             if (value & ~s->engine153_pending[bank]) { goto invalid; }
@@ -15135,7 +16110,8 @@ static bool engine153_config_write(NikonZ9State *s, hwaddr addr,
         }
         engine153_irq_update(s, bank); return true;
     }
-    if ((s->engine153_frame_pass_model || s->engine153_inplace_identity_model) && s->engine153_pending[bank] &&
+    if ((s->engine153_frame_pass_model || s->engine153_inplace_identity_model) &&
+        (s->engine153_pending[bank] || s->engine153_waiting[bank]) &&
         off != 0x20) { goto invalid; }
     if (size != 4 || (!mask && (off != 4 || value)) || (value & ~(uint64_t)mask)) {
 invalid:
@@ -15202,6 +16178,18 @@ static void engine15e2_jpeg_irq_update(NikonZ9State *s)
  * validate the visible border bytes; never create a RAM/FIFO alias. */
 static int engine15e2_owned_source(NikonZ9State *s, unsigned b)
 {
+    const uint32_t *movie = s->engine15e2_config[b];
+    if (s->video_preview_model && s->video_preview_jobs) {
+        for (unsigned j=0;j<3;j++) {
+            if ((s->engine15e2_preflight_model || s->video_preview_jpeg_consumed[j]!=s->video_preview_jobs) &&
+                (s->video_preview_sub[j]==1 || s->video_preview_sub[j]==2) &&
+                movie[0x418/4]==s->video_preview_w[j] && movie[0x41c/4]==s->video_preview_h[j] &&
+                movie[0x410/4]==s->video_preview_pitch[j] && movie[0x414/4]==s->video_preview_pitch[j] &&
+                ((uint64_t)movie[0x430/4]<<4)==s->video_preview_y[j] &&
+                ((uint64_t)movie[0x434/4]<<4)==s->video_preview_uv[j]) { return 4+j; }
+        }
+    }
+    if (s->capture_frame_pool_model) { return capture_pool_jpeg_owner(s,b); }
     int owner = capture_nv16_jpeg_owner(s, b);
     if (owner >= 0) { return owner; }
     /* Original517 reads the same retained small RAM after its first commit.
@@ -15248,12 +16236,39 @@ static int engine15e2_owned_source(NikonZ9State *s, unsigned b)
 }
 
 static uint64_t engine15e2_source_generation(NikonZ9State *s, int owner)
-{ return owner == 3 ? s->capture_thumbnail_jobs : s->capture_nv16_jobs; }
+{ return owner >= 8 ? s->capture_surfaces[owner-8].generation : (owner >= 4 && owner <= 6) ? s->video_preview_jobs : owner == 3 ? s->capture_thumbnail_jobs : s->capture_nv16_jobs; }
+
+static unsigned engine15e2_source_chroma_divisor(NikonZ9State *s,int owner)
+{ return owner>=4 && owner<=6 ? s->video_preview_sub[owner-4] : 1; }
+
+/* Admission is separate from producer ownership. The small count-only
+ * descriptor may arrive before the thumbnail, but it cannot read RAM or
+ * complete until an actual matching owned surface has been produced. */
+static bool engine15e2_small_count_owner(NikonZ9State *s, int owner)
+{
+    return owner == 1 || owner == 2 || owner == 3 || owner == 5 || owner == 6 ||
+        capture_pool_small_owner(s, owner);
+}
+
+static bool engine15e2_queued_count(NikonZ9State *s, unsigned b)
+{
+    const uint32_t *c = s->engine15e2_config[b];
+    uint64_t plane = (uint64_t)c[0x410 / 4] * c[0x41c / 4];
+    return s->engine15e2_deferred_input_model && s->engine15e2_preflight_model &&
+        s->engine15e2_limit_disabled_model && s->capture_thumbnail_model &&
+        (c[0x404 / 4] & ~0x4000u) == 2 && c[0x458 / 4] == 0 &&
+        c[0x418 / 4] && c[0x418 / 4] <= 1024 &&
+        c[0x41c / 4] && c[0x41c / 4] <= 1024 && plane && plane <= 4 * MiB;
+}
 
 static bool engine15e2_jpeg_source_ready(NikonZ9State *s, unsigned b)
 {
     const uint32_t *c = s->engine15e2_config[b];
-    return engine15e2_owned_source(s, b) >= 0 || (s->engine151_capture_jobs &&
+    int owner = engine15e2_owned_source(s, b);
+    if (s->engine15e2_preflight_model && (c[0x404 / 4] & 2)) {
+        return engine15e2_small_count_owner(s, owner);
+    }
+    return owner >= 0 || (s->engine151_capture_jobs &&
         s->engine15e2_jpeg_consumed_job != s->engine151_capture_jobs &&
         c[0x418 / 4] == s->engine151_capture_width &&
         c[0x41c / 4] == s->engine151_capture_height &&
@@ -15270,7 +16285,8 @@ static bool engine15e2_limit_disabled_request(NikonZ9State *s, unsigned b)
     const uint32_t *c = s->engine15e2_config[b];
     int owner = engine15e2_owned_source(s, b);
     return s->engine15e2_limit_disabled_model &&
-        c[0x404 / 4] == 2 && c[0x458 / 4] == 0 && (owner == 1 || owner == 2 || owner == 3);
+        (c[0x404 / 4] & ~0x4000u) == 2 && c[0x458 / 4] == 0 &&
+        (engine15e2_small_count_owner(s, owner) || engine15e2_queued_count(s, b));
 }
 
 static bool engine15e2_jpeg_request(NikonZ9State *s, unsigned b)
@@ -15288,7 +16304,10 @@ static bool engine15e2_jpeg_request(NikonZ9State *s, unsigned b)
      * a temporary codec ceiling is not a DMA allocation or writable span. */
     bool count_only = no_limit && s->engine15e2_preflight_model;
     int owner = engine15e2_owned_source(s, b);
-    if (count_only && owner < 0) { return false; }
+    if (count_only && owner < 0 && !engine15e2_queued_count(s, b)) { return false; }
+    unsigned chroma_div=engine15e2_source_chroma_divisor(s,owner);
+    if (!chroma_div || h%chroma_div) { return false; }
+    uint64_t uv_plane=plane/chroma_div;
     /* Count passes may repeat with other quantizers. Every pass reads the
      * actual RAM and encodes anew; pending request/core/IRQ gates below
      * still prohibit overlapping jobs or an invented completion. */
@@ -15297,19 +16316,19 @@ static bool engine15e2_jpeg_request(NikonZ9State *s, unsigned b)
         s->engine15e2_jpeg_requested || s->engine15e2_jpeg_pending || s->engine15e2_jpeg_core ||
         c[0] != 0x31 || c[0x0c / 4] != 0x14 || c[0x10 / 4] != 0x3c ||
         c[0x14 / 4] || c[0x24 / 4] != 4 || c[0x28 / 4] != 0x70f ||
-        (no_limit ? (c[0x400 / 4] != 0 && c[0x400 / 4] != 0x20) : c[0x400 / 4]) || (!no_limit && c[0x404 / 4]) || c[0x408 / 4] != 0x10000 ||
+        (no_limit ? (c[0x400 / 4] != 0 && c[0x400 / 4] != 0x20) : c[0x400 / 4]) || (c[0x404 / 4] != (no_limit ? 2 : 0)) || c[0x408 / 4] != 0x10000 ||
         c[0x450 / 4] || c[0x454 / 4] ||
         !w || !h || (w & 1) || stride < w || stride > 16384 ||
         c[0x414 / 4] != stride || c[0x1c / 4] != (w >> scale) || c[0x18 / 4] != (h >> scale) ||
         !(w >> scale) || !(h >> scale) ||
         !plane || plane > 64 * MiB || (!no_limit && !capacity) || capacity > 128 * MiB ||
         y < UINT64_C(0x800000000) || y > UINT64_C(0x900000000) - plane ||
-        uv < UINT64_C(0x800000000) || uv > UINT64_C(0x900000000) - plane ||
+        uv < UINT64_C(0x800000000) || uv > UINT64_C(0x900000000) - uv_plane ||
         (!count_only && (out < UINT64_C(0x800000000) || out > UINT64_C(0x900000000) - target_span)) ||
-        !dma_ram_range(s, y, plane) || !dma_ram_range(s, uv, plane) ||
+        !dma_ram_range(s, y, plane) || !dma_ram_range(s, uv, uv_plane) ||
         (!count_only && (!dma_ram_range(s, out, target_span) ||
         (out < y + plane && y < out + target_span) ||
-        (out < uv + plane && uv < out + target_span)))) { return false; }
+        (out < uv + uv_plane && uv < out + target_span)))) { return false; }
     for (unsigned word = 0x100 / 4; word < 0x180 / 4; word++) {
         uint32_t q = c[word];
         for (unsigned shift = 0; shift < 32; shift += 8) {
@@ -15333,6 +16352,10 @@ static bool engine15e2_jpeg_pixels(NikonZ9State *s, unsigned b)
     unsigned scale = no_limit ? (c[0x400 / 4] >> 4) & 3 : 0;
     if (!engine15e2_jpeg_source_ready(s, b)) { return false; }
     int capture_owner = engine15e2_owned_source(s, b);
+    if (count_only && !engine15e2_small_count_owner(s, capture_owner)) { return false; }
+    unsigned chroma_div=engine15e2_source_chroma_divisor(s,capture_owner);
+    if (!chroma_div || h%chroma_div) { return false; }
+    size_t uv_plane=plane/chroma_div;
     uint8_t quantizers[2][64];
     for (unsigned t = 0; t < 2; t++) {
         for (unsigned at = 0; at < 64; at++) {
@@ -15341,8 +16364,16 @@ static bool engine15e2_jpeg_pixels(NikonZ9State *s, unsigned b)
     }
     uint8_t *input = g_malloc(plane * 2);
     if (address_space_read(&address_space_memory, y, MEMTXATTRS_UNSPECIFIED, input, plane) != MEMTX_OK ||
-        address_space_read(&address_space_memory, uv, MEMTXATTRS_UNSPECIFIED, input + plane, plane) != MEMTX_OK) {
+        address_space_read(&address_space_memory, uv, MEMTXATTRS_UNSPECIFIED, input + plane, uv_plane) != MEMTX_OK) {
         g_free(input); return false;
+    }
+    /* Expand only the private codec copy. Never read an invented second
+     * half-plane from guest RAM or modify the producer's NV12 storage. */
+    if (chroma_div==2) {
+        for (unsigned row=h;row-- > 0;) {
+            memmove(input+plane+(size_t)row*stride,
+                input+plane+(size_t)(row/2)*stride,stride);
+        }
     }
     unsigned char *encoded = NULL; size_t bytes = 0;
     bool ok = no_limit ? wonderlantern_nv16_jpeg_scaled(input, plane, input + plane, plane,
@@ -15355,7 +16386,7 @@ static bool engine15e2_jpeg_pixels(NikonZ9State *s, unsigned b)
      * actual stream crosses a sparse hole, MMIO, a RAM edge or source plane. */
     if (!bytes || bytes > temporary_ceiling || (!count_only && (!dma_ram_range(s, out, bytes) ||
         (out < y + plane && y < out + bytes) ||
-        (out < uv + plane && uv < out + bytes)))) { free(encoded); return false; }
+        (out < uv + uv_plane && uv < out + bytes)))) { free(encoded); return false; }
     if (!count_only && address_space_write(&address_space_memory, out, MEMTXATTRS_UNSPECIFIED, encoded, bytes) != MEMTX_OK) {
         free(encoded); return false;
     }
@@ -15367,11 +16398,16 @@ static bool engine15e2_jpeg_pixels(NikonZ9State *s, unsigned b)
         s->engine15e2_encoded_height = h >> scale;
         s->engine15e2_encoded_scale = scale;
     }
-    s->engine15e2_jpeg_input_bytes += plane * 2;
+    s->engine15e2_jpeg_input_bytes += plane + uv_plane;
+    s->engine15e2_jpeg_chroma_divisor=chroma_div;
     s->engine15e2_last_count_only = count_only;
-    if (count_only) {
+    if (capture_owner >= 8) {
+        capture_pool_jpeg_complete(s,capture_owner,count_only);
+    } else if (count_only) {
         s->engine15e2_count_consumed[capture_owner] = engine15e2_source_generation(s,capture_owner);
         s->engine15e2_count_jobs++;
+    } else if (capture_owner >= 4 && capture_owner <= 6) {
+        s->video_preview_jpeg_consumed[capture_owner-4] = s->video_preview_jobs;
     } else if (capture_owner == 3) {
         s->engine15e2_thumbnail_consumed = s->capture_thumbnail_jobs;
     } else if (capture_owner >= 0) {
@@ -15400,12 +16436,19 @@ static bool engine15e2_jpeg_pixels(NikonZ9State *s, unsigned b)
 }
 
 
+static bool engine15e2_deferred_armed(NikonZ9State *s, unsigned b)
+{
+    const uint32_t *c = s->engine15e2_config[b];
+    bool count = engine15e2_limit_disabled_request(s, b) && s->engine15e2_preflight_model;
+    return s->engine15e2_deferred_input_model && s->engine15e2_jpeg_requested &&
+        c[0x404 / 4] == (count ? 0x4002 : 0x4000) &&
+        (c[0x400 / 4] == 0x4000 || (count && c[0x400 / 4] == 0x4020));
+}
+
 static void engine15e2_deferred_input_notify(NikonZ9State *s)
 {
     unsigned b = s->engine15e2_active_bank;
-    if (!s->engine15e2_deferred_input_model || !s->engine15e2_jpeg_requested ||
-        s->engine15e2_deferred_failed || s->engine15e2_config[b][0x400 / 4] != 0x4000 ||
-        s->engine15e2_config[b][0x404 / 4] != 0x4000) { return; }
+    if (!engine15e2_deferred_armed(s, b) || s->engine15e2_deferred_failed) { return; }
     s->engine15e2_deferred_notifications++;
     if (!engine15e2_jpeg_source_ready(s, b)) { return; }
     if (!engine15e2_jpeg_pixels(s, b)) {
@@ -15434,13 +16477,11 @@ static char *get_engine15e2_deferred_input_state(Object *obj, Error **errp)
 {
     NikonZ9State *s = NIKON_Z9_LAB(obj);
     unsigned b = s->engine15e2_active_bank;
-    bool waiting = s->engine15e2_deferred_input_model && s->engine15e2_jpeg_requested &&
-        s->engine15e2_config[b][0x400 / 4] == 0x4000 &&
-        s->engine15e2_config[b][0x404 / 4] == 0x4000 && !engine15e2_jpeg_source_ready(s, b);
+    bool waiting = engine15e2_deferred_armed(s, b) && !engine15e2_jpeg_source_ready(s, b);
     return g_strdup_printf("{\"enabled\":%s,\"waiting_for_source\":%s,\"failed\":%s,"
         "\"waits\":%" PRIu64 ",\"producer_notifications\":%" PRIu64 ","
         "\"physical_timing_verified\":false,\"native_file_saved\":false,"
-        "\"scope\":\"bounded immutable JPEG request; only actual fresh matching151 RAM permits encoding; missing producer remains busy\"}",
+        "\"scope\":\"bounded immutable JPEG request; only actual matching owned RAM permits encoding; missing producer remains busy\"}",
         s->engine15e2_deferred_input_model ? "true" : "false", waiting ? "true" : "false",
         s->engine15e2_deferred_failed ? "true" : "false", s->engine15e2_deferred_waits,
         s->engine15e2_deferred_notifications);
@@ -15640,14 +16681,15 @@ static char *get_engine15e2_jpeg_state(Object *obj, Error **errp)
         ",\"consumed151job\":%" PRIu64 ",\"pending\":%u,\"core\":%u,"
         "\"output\":%" PRIu64 ",\"last_bytes\":%" PRIu64 ",\"capacity\":%" PRIu64
         ",\"y\":%" PRIu64 ",\"uv\":%" PRIu64 ",\"width\":%u,\"height\":%u,\"stride\":%u,"
-        "\"physical_algorithm_verified\":false,\"scope\":\"actual generated151 RAM -> baseline libjpeg whole-stream; original cause subscriptions; 470=input lines and physical header/units/timing provisional; no file-save proof\"}",
+        "\"input_chroma_divisor\":%u,\"physical_algorithm_verified\":false,\"scope\":\"actual generated151 RAM -> baseline libjpeg whole-stream; original cause subscriptions; 470=input lines and physical header/units/timing provisional; no file-save proof\"}",
         s->engine15e2_jpeg_model ? "true" : "false", s->engine15e2_jpeg_requested ? "true" : "false",
         s->engine15e2_jpeg_result_valid ? "true" : "false", s->engine15e2_jpeg_requests,
         s->engine15e2_jpeg_jobs, s->engine15e2_jpeg_bytes, s->engine15e2_jpeg_input_bytes,
         s->engine15e2_jpeg_acks, s->engine15e2_jpeg_core_acks, s->engine15e2_jpeg_consumed_job,
         s->engine15e2_jpeg_pending, s->engine15e2_jpeg_core, s->engine15e2_jpeg_output,
         s->engine15e2_jpeg_last_bytes, s->engine15e2_jpeg_capacity, s->engine15e2_jpeg_y,
-        s->engine15e2_jpeg_uv, s->engine15e2_jpeg_width, s->engine15e2_jpeg_height, s->engine15e2_jpeg_stride);
+        s->engine15e2_jpeg_uv, s->engine15e2_jpeg_width, s->engine15e2_jpeg_height, s->engine15e2_jpeg_stride,
+        s->engine15e2_jpeg_chroma_divisor ? s->engine15e2_jpeg_chroma_divisor : 1);
 }
 
 static bool engine15e2_config_register(NikonZ9State *s, hwaddr addr,
@@ -15905,16 +16947,22 @@ static bool engine152c_stream_start(NikonZ9State *s)
         }
     }
     memcpy(s->engine152c_stream_outputs,outputs,sizeof(outputs));
+    if (s->video_raw_receiver_banks_model) {
+        s->video_raw_receiver_bank=0;s->video_raw_receiver_wait_bank=false;
+        s->video_raw_receiver_fresh&=~0xffu;
+    }
     if (s->backend_program_epoch_model) {
         s->backend_program_latches++;
         s->backend_program_uploads+=s->backend_program_dirty;s->backend_program_dirty=false;
     }
-    s->engine152c_stream_requested=true;s->engine152c_stream_requests++;
+    s->engine152c_stream_requested=true;s->engine152c_stream_requests++;s->video_backend_locally_disabled[0]=false;
     /* A new receiver request owns a new supply epoch. Old unconsumed input
      * addresses must not authorize stale bytes after cancellation/restart. */
     s->engine152c_stream_inputs_valid=0;
     s->engine152c_stream_capacity=amount;s->engine152c_stream_row=0;
     s->engine152c_stream_width=c[0x548/4];s->engine152c_stream_height=c[0x54c/4];
+    s->video_raw_receiver_left=c[0x538/4];s->video_raw_receiver_top=c[0x53c/4];
+    s->video_raw_receiver_mode=c[0x540/4];
     return true;
 }
 
@@ -16076,7 +17124,7 @@ static bool engine152c_config_write(NikonZ9State *s, hwaddr addr,
     if (s->video_backend_drain_model && value &&
         (addr==0x152c0000 || addr==0x152c0004 || addr==0x152c0008) &&
         (s->video_backend_drain_requested[0] || s->video_backend_drain_done[0] ||
-         s->video_raw_packet_owned || (s->engine152c_stream_pending&4))) {
+         video_raw_packet_blocks_producer(s) || (s->engine152c_stream_pending&4))) {
         unknown_access(s,addr,value,size,true);return true;
     }
     unsigned b, o; uint32_t mask;
@@ -16091,18 +17139,20 @@ static bool engine152c_config_write(NikonZ9State *s, hwaddr addr,
         (b && o == 0x50 && (s->backend_program_epoch_model ?
             (s->backend_program_cursor==64 || s->engine152c_stream_requested ||
              s->video_backend_drain_requested[0] || s->video_backend_drain_done[0] ||
-             s->engine152c_stream_pending || s->video_raw_packet_owned) : s->engine152c_fifo_words==64))) {
+             s->engine152c_stream_pending || video_raw_packet_blocks_producer(s)) : s->engine152c_fifo_words==64))) {
         unknown_access(s, addr, value, size, true); return true;
     }
     if (!b && o == 8 && value &&
         !(s->engine152c_stream_model && !c[0x52c/4] ? engine152c_stream_start(s) : engine152c_request_start(s))) {
         unknown_access(s, addr, value, size, true); return true;
     }
+    if (!b && o==4 && value) { s->video_backend_locally_disabled[0]=false; }
     if (s->engine152c_stream_model) {
         if (!b && (o==0 || o==4) && value && s->engine152c_stream_requested) {
             unknown_access(s,addr,value,size,true);return true;
         }
         if (!b && o==8 && !value && s->engine152c_stream_requested) {
+            s->video_backend_locally_disabled[0]=true;
             s->engine152c_stream_requested=false;s->engine152c_stream_cancels++;
         }
         if (!b && o==0x1c) {
@@ -16116,6 +17166,9 @@ static bool engine152c_config_write(NikonZ9State *s, hwaddr addr,
         }
         if (!b && o>=0x120 && o<0x160) {
             s->engine152c_stream_outputs_valid |= 1u<<((o-0x120)/4);
+            if (s->video_raw_receiver_banks_model) {
+                s->video_raw_receiver_fresh |= 1u<<((o-0x120)/4);
+            }
         }
         if (!b && o>=0x220 && o<0x260) {
             s->engine152c_stream_inputs_valid |= 1u<<((o-0x220)/4);
@@ -16442,7 +17495,7 @@ static char *get_engine1540_alternate_bank_state(Object *obj, Error **errp)
             ",\"last_result_bytes\":%u,\"parameter_writes\":%" PRIu64
             ",\"descriptor_writes\":%" PRIu64 "}",
             bank ? "," : "", bank, 0x130 + bank, p->frame_jobs, p->frame_bytes,
-            p->frame_frame, p->frame_acks, p->frame_pending, p->frame_source, p->frame_target,
+            p->last_conversion ? 0 : p->frame_frame, p->frame_acks, p->frame_pending, p->frame_source, p->frame_target,
             p->frame_hash, p->frame_readback, p->frame_result_bytes, p->parameter_writes, p->descriptor_writes);
     }
     g_string_append(out, "]}"); return g_string_free(out, false);
@@ -16472,7 +17525,7 @@ static bool engine1540_descriptor_write(NikonZ9State *s, hwaddr addr, uint64_t v
 {
     unsigned i, bank; uint32_t mask;
     if (!engine1540_descriptor_address(s, addr, &i, &mask, &bank)) { return false; }
-    if (s->raw_transport[bank].frame_pending) { unknown_access(s, addr, value, size, true); return true; }
+    if (s->raw_transport[bank].frame_pending || s->engine1540_waiting[bank]) { unknown_access(s, addr, value, size, true); return true; }
     /* The two original setters generate selector values 0, 2 or 3 only. */
     if (size != 4 || !mask || (value & ~(uint64_t)mask) || ((i == 0 || i == 5) && value == 1)) {
         unknown_access(s, addr, value, size, true); return true;
@@ -16758,9 +17811,13 @@ static bool engine1540_parameter_write(NikonZ9State *s, hwaddr addr, uint64_t va
     if (size != 4 || !mask || (value & ~(uint64_t)mask)) {
         unknown_access(s, addr, value, size, true); return true;
     }
-    if (s->raw_transport[bank].frame_pending) { unknown_access(s, addr, value, size, true); return true; }
+    if (s->raw_transport[bank].frame_pending || s->engine1540_waiting[bank]) { unknown_access(s, addr, value, size, true); return true; }
     if (off == 0x44) { s->engine_pair_init[bank][2] = value; }
     s->raw_transport[bank].parameters[off / 4] = value; s->raw_transport[bank].parameter_writes++;
+    static const unsigned request_fields[] = {0x40,0x4c,0x50,0xd4,0x400,0x404,0x408,0x420,0x424,0x428};
+    for (unsigned i=0;i<ARRAY_SIZE(request_fields);i++) {
+        if (off==request_fields[i]) { s->raw_transport[bank].reprogram_fields |= 1u<<i; }
+    }
     fprintf(stderr, "Z9_1540_PARAMETER offset=%x value=%" PRIx64 "; sparse params/LUT only, no processing\n", off, value);
     return true;
 }
@@ -16819,11 +17876,126 @@ static bool engine1540_frame_read(NikonZ9State *s, hwaddr addr, unsigned size, u
     return true;
 }
 
-static bool engine1540_frame_write(NikonZ9State *s, hwaddr addr, uint64_t value, unsigned size)
+/* Original Z9/ZR parameter leaves emit mode10009, control2 and budget0
+ * for the equal packed14 conversion selected by the RAW fallback wrapper.
+ * This is a memory-input operation, not a sensor exposure or a new151 frame.
+ * Read the programmed RAM, including padding; never regenerate it from the
+ * host Bayer image, apply the F0 encoder, or advance capture freshness.
+ * Only this observed identity format pair is implemented. */
+static bool engine1540_packed_conversion(NikonZ9State *s, unsigned bank)
 {
-    unsigned bank; hwaddr base;
-    if (!s->engine1540_frame_pass_model || !raw_transport_bank(s, addr, &bank, &base) ||
-        addr != base + 8) { return false; }
+    Ex7RawTransport *t = &s->raw_transport[bank];
+    const uint32_t *p = t->parameters;
+    uint32_t w = p[0x4c / 4], h = p[0x50 / 4], pitch = p[0x408 / 4];
+    uint64_t bytes = (uint64_t)pitch * h;
+    uint64_t source = p[0x400 / 4] | ((uint64_t)p[0x404 / 4] << 32);
+    uint64_t target = p[0x420 / 4] | ((uint64_t)p[0x424 / 4] << 32);
+    if (t->frame_pending || s->engine1540_waiting[bank] ||
+        s->raw_transport[1-bank].frame_pending || s->engine1540_waiting[1-bank] ||
+        p[0x40 / 4] != 0x10009 || s->engine_pair_init[bank][2] != 2 ||
+        p[0x48 / 4] || p[0x1a0 / 4] || p[0xd4 / 4] ||
+        p[0x184 / 4] || p[0x188 / 4] || p[0x18c / 4] || p[0x190 / 4] ||
+        p[0x1d8 / 4] || p[0x1dc / 4] || !w || !h || ((w | h) & 1) ||
+        w > NIKON_RAW_MAX_DIMENSION || h > NIKON_RAW_MAX_DIMENSION ||
+        (uint64_t)w * h > NIKON_RAW_MAX_SAMPLES || !bytes || bytes > 128 * MiB ||
+        pitch != p[0x428 / 4] ||
+        pitch != ((((uint64_t)w * 14 + 7) / 8 + 31) & ~UINT64_C(31)) ||
+        (source & 31) || (target & 31) ||
+        source < UINT64_C(0x840000000) || target < UINT64_C(0x840000000) ||
+        source > UINT64_C(0x900000000) - bytes || target > UINT64_C(0x900000000) - bytes ||
+        !dma_ram_range(s, source, bytes) || !dma_ram_range(s, target, bytes) ||
+        (source < target + bytes && target < source + bytes)) {
+        return false;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(t->descriptors); i++) {
+        unsigned lane = i % 5;
+        if (t->descriptors[i] != (lane == 0 ? 2 : lane == 1 ? 0xff : 0)) {
+            return false;
+        }
+    }
+    uint8_t *buffer = g_try_malloc(bytes);
+    if (!buffer) { return false; }
+    if (address_space_read(&address_space_memory, source, MEMTXATTRS_UNSPECIFIED,
+                           buffer, bytes) != MEMTX_OK) {
+        g_free(buffer); return false;
+    }
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (uint64_t i = 0; i < bytes; i++) { hash = (hash ^ buffer[i]) * UINT64_C(1099511628211); }
+    if (address_space_write(&address_space_memory, target, MEMTXATTRS_UNSPECIFIED,
+                            buffer, bytes) != MEMTX_OK ||
+        address_space_read(&address_space_memory, target, MEMTXATTRS_UNSPECIFIED,
+                           buffer, bytes) != MEMTX_OK) {
+        g_free(buffer); return false;
+    }
+    uint64_t readback = UINT64_C(14695981039346656037);
+    for (uint64_t i = 0; i < bytes; i++) { readback = (readback ^ buffer[i]) * UINT64_C(1099511628211); }
+    g_free(buffer);
+    if (hash != readback) { return false; }
+    t->frame_jobs++; t->frame_bytes += bytes;
+    t->conversion_jobs++; t->conversion_bytes += bytes; t->last_conversion = true;
+    t->reprogram_fields = 0;
+    /* frame_frame is the last consumed151 generation. Keep its ownership
+     * guard across conversion so an already encoded frame cannot be reused. */
+    t->frame_source = source; t->frame_target = target;
+    t->frame_hash = hash; t->frame_readback = readback;
+    t->frame_result_bytes = bytes; t->frame_pending = 0x100;
+    engine1540_frame_update_irq(s, bank);
+    fprintf(stderr, "Z9_1540_PACKED_CONVERSION bank=%u source=%" PRIx64
+        " target=%" PRIx64 " bytes=%" PRIu64 " fnv64=%" PRIx64
+        "; actual RAM identity copy, no new sensor frame or compression\n",
+        bank, source, target, bytes, hash);
+    return true;
+}
+
+static char *get_engine1540_reencode_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);
+    return g_strdup_printf("{\"jobs\":[%"PRIu64",%"PRIu64"],\"input_hash\":[%"PRIu64",%"PRIu64"],"
+        "\"reprogram_fields\":[%u,%u],\"scope\":\"complete new codec descriptor from unchanged owned RAW; never a new capture\"}",
+        s->raw_transport[0].reencode_jobs,s->raw_transport[1].reencode_jobs,
+        s->raw_transport[0].frame_input_hash,s->raw_transport[1].frame_input_hash,
+        s->raw_transport[0].reprogram_fields,s->raw_transport[1].reprogram_fields);
+}
+
+static char *get_engine1540_conversion_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s = NIKON_Z9_LAB(obj);
+    GString *out = g_string_new("{\"banks\":[");
+    for (unsigned b = 0; b < 2; b++) {
+        Ex7RawTransport *t = &s->raw_transport[b];
+        g_string_append_printf(out, "%s{\"jobs\":%" PRIu64 ",\"bytes\":%" PRIu64
+            ",\"last_conversion\":%s,\"last_consumed_151_frame\":%" PRIu64 "}",
+            b ? "," : "", t->conversion_jobs, t->conversion_bytes,
+            t->last_conversion ? "true" : "false", t->frame_frame);
+    }
+    g_string_append(out, "],\"scope\":\"same-format packed14 RAM copy; not a new capture, codec or NEF acceptance\"}");
+    return g_string_free(out, false);
+}
+
+/* Native641/643 reprogram all RAW fields and submit the same source/target.
+ * This is a codec job, not another exposure. Restrict the retained-source
+ * path to the latest completed 151 generation and verify its entire RAM
+ * hash before encoding; a queued producer still takes precedence at START. */
+static int engine1540_reencode_owner(NikonZ9State *s, unsigned bank, uint64_t source, uint64_t target)
+{
+    /* A bare repeated START is not a new descriptor. Every required field
+     * must have been reprogrammed after the previous completed command. */
+    if (s->raw_transport[bank].reprogram_fields != 0x3ff) { return -1; }
+    if (!s->engine1540_lossless14_model || s->engine151_capture_waiting ||
+        s->engine151_active[0] || s->engine151_capture_pending ||
+        s->engine151_pending[0]) { return -1; }
+    for (unsigned j=0;j<ARRAY_SIZE(s->engine151_owned_raw);j++) {
+        const Ex7OwnedRaw *owned=&s->engine151_owned_raw[j];
+        const uint32_t *p=s->raw_transport[bank].parameters;
+        if (owned->frame && owned->acknowledged && owned->address==source &&
+            owned->geometry==(p[0x4c/4] | (p[0x50/4]<<16)) &&
+            owned->pitch==p[0x408/4] && owned->bytes==(uint64_t)p[0x408/4]*p[0x50/4]) { return j; }
+    }
+    return -1;
+}
+
+static bool engine1540_transfer(NikonZ9State *s, unsigned bank, bool validate_only, bool future)
+{
     uint32_t *p = s->raw_transport[bank].parameters;
     uint64_t source = p[0x400 / 4] | ((uint64_t)p[0x404 / 4] << 32);
     uint64_t target = p[0x420 / 4] | ((uint64_t)p[0x424 / 4] << 32);
@@ -16838,30 +18010,49 @@ static bool engine1540_frame_write(NikonZ9State *s, hwaddr addr, uint64_t value,
      * synthesize the source from the host input/cache or alias unresolved
      * codec endpoints. Command14 is not a start prerequisite: native493
      * requests data8 with14=0. Its physical role remains unverified. */
-    if (size != 4 || value != 1 || s->raw_transport[bank].frame_pending ||
-        !s->engine151_raw_output_jobs || s->engine151_capture_pending ||
-        s->engine151_raw_output_frame != s->primary_d980_frames ||
-        MAX(s->raw_transport[0].frame_frame, s->raw_transport[1].frame_frame) >= s->engine151_raw_output_frame ||
-        s->raw_transport[1 - bank].frame_pending ||
-        source != s->engine151_raw_output_target || !routes ||
+    uint32_t *up=s->engine151_config[0];
+    uint64_t producer=future ? (up[0x4c0/4] | ((uint64_t)up[0x4c4/4]<<32)) : s->engine151_raw_output_target;
+    int retry = !future ? engine1540_reencode_owner(s,bank,source,target) : -1;
+    bool consumed = MAX(s->raw_transport[0].frame_frame, s->raw_transport[1].frame_frame) >= s->engine151_raw_output_frame;
+    bool reencode = !future && retry>=0 &&
+        (consumed || source!=s->engine151_raw_output_target);
+    const Ex7OwnedRaw *owned=reencode ? &s->engine151_owned_raw[retry] : NULL;
+    if (owned) { producer=owned->address; }
+    if (s->raw_transport[bank].frame_pending || !s->engine151_raw_output_model ||
+        (!future && (!s->engine151_raw_output_jobs || s->engine151_capture_pending ||
+         /* A later sensor DMA does not overwrite the independently owned
+          * acknowledged151 output. Complete reprogramming, source identity
+          * and whole-buffer hash below still prove a retained reencode. */
+         (s->engine151_raw_output_frame != s->primary_d980_frames && !reencode) ||
+         (consumed && !reencode))) ||
+        s->raw_transport[1-bank].frame_pending || s->engine1540_waiting[1-bank] ||
+        source != producer || !routes ||
         !s->primary_d980_packed14_model || s->primary_d980_cache_format != 1 ||
         p[0x40 / 4] != 0x10001 || s->engine_pair_init[bank][2] || p[0x48 / 4] || p[0x1a0 / 4] ||
         p[0x184 / 4] || p[0x188 / 4] || p[0x18c / 4] || p[0x190 / 4] ||
         p[0x1d8 / 4] || p[0x1dc / 4] || !w || !h || !bytes || bytes > (128U << 20) ||
-        (w | (h << 16)) != s->engine151_config[0][0x4a0 / 4] ||
-        pitch != s->engine151_config[0][0x4d0 / 4] || pitch != p[0x428 / 4] ||
+        (w | (h << 16)) != (owned ? owned->geometry : s->engine151_config[0][0x4a0 / 4]) ||
+        pitch != (owned ? owned->pitch : s->engine151_config[0][0x4d0 / 4]) || pitch != p[0x428 / 4] ||
         pitch != ((((uint64_t)w * 14 + 7) / 8 + 31) & ~UINT64_C(31)) ||
         p[0xd4 / 4] != bytes || (source & 31) || (target & 31) ||
         source < UINT64_C(0x840000000) || target < UINT64_C(0x840000000) ||
         source > UINT64_C(0x900000000) - bytes || target > UINT64_C(0x900000000) - bytes ||
         !dma_ram_range(s, source, bytes) || !dma_ram_range(s, target, bytes) ||
         (source < target + bytes && target < source + bytes)) {
-        unknown_access(s, addr, value, size, true); return true;
+        return false;
     }
+    if (validate_only) { return true; }
     uint8_t *buffer = g_try_malloc(bytes);
-    if (!buffer) { unknown_access(s, addr, value, size, true); return true; }
+    if (!buffer) { return false; }
     if (address_space_read(&address_space_memory, source, MEMTXATTRS_UNSPECIFIED, buffer, bytes) != MEMTX_OK) {
-        g_free(buffer); unknown_access(s, addr, value, size, true); return true;
+        g_free(buffer); return false;
+    }
+    uint64_t input_hash = UINT64_C(14695981039346656037);
+    for (uint64_t i = 0; i < bytes; i++) { input_hash = (input_hash ^ buffer[i]) * UINT64_C(1099511628211); }
+    if (reencode && input_hash != owned->hash) {
+        fprintf(stderr,"Z9_RAW_REENCODE_CHANGED bank=%u actual=%"PRIx64" expected=%"PRIx64"\n",
+            bank,input_hash,owned->hash);
+        g_free(buffer); return false;
     }
     uint64_t output_bytes=bytes;
     if (s->engine1540_lossless14_model) {
@@ -16874,7 +18065,7 @@ static bool engine1540_frame_write(NikonZ9State *s, hwaddr addr, uint64_t value,
         if (!encoded || !nikon_z8_lossless14_encode(buffer,bytes,w,h,pitch,
                 seeds,encoded,bytes,&written)) {
             g_free(encoded);g_free(buffer);
-            unknown_access(s,addr,value,size,true);return true;
+            return false;
         }
         g_free(buffer);buffer=encoded;output_bytes=written;
     }
@@ -16882,14 +18073,18 @@ static bool engine1540_frame_write(NikonZ9State *s, hwaddr addr, uint64_t value,
     for (uint64_t i = 0; i < output_bytes; i++) { hash = (hash ^ buffer[i]) * UINT64_C(1099511628211); }
     if (address_space_write(&address_space_memory, target, MEMTXATTRS_UNSPECIFIED, buffer, output_bytes) != MEMTX_OK ||
         address_space_read(&address_space_memory, target, MEMTXATTRS_UNSPECIFIED, buffer, output_bytes) != MEMTX_OK) {
-        g_free(buffer); unknown_access(s, addr, value, size, true); return true;
+        g_free(buffer); return false;
     }
     uint64_t readback = UINT64_C(14695981039346656037);
     for (uint64_t i = 0; i < output_bytes; i++) { readback = (readback ^ buffer[i]) * UINT64_C(1099511628211); }
     g_free(buffer);
-    if (hash != readback) { unknown_access(s, addr, value, size, true); return true; }
+    if (hash != readback) { return false; }
     s->raw_transport[bank].frame_jobs++; s->raw_transport[bank].frame_bytes += output_bytes;
-    s->raw_transport[bank].frame_frame = s->engine151_raw_output_frame;
+    s->raw_transport[bank].last_conversion = false;
+    s->raw_transport[bank].frame_input_hash = input_hash;
+    s->raw_transport[bank].reprogram_fields = 0;
+    if (reencode) { s->raw_transport[bank].reencode_jobs++; }
+    s->raw_transport[bank].frame_frame = owned ? owned->frame : s->engine151_raw_output_frame;
     s->raw_transport[bank].frame_source = source; s->raw_transport[bank].frame_target = target;
     s->raw_transport[bank].frame_hash = hash; s->raw_transport[bank].frame_readback = readback;
     /* Publish only the last successfully completed output, never a configured
@@ -16905,6 +18100,84 @@ static bool engine1540_frame_write(NikonZ9State *s, hwaddr addr, uint64_t value,
         source, target, output_bytes, s->raw_transport[bank].frame_frame, hash,
         s->engine1540_lossless14_model ? "F0 lossless14" : "packed14 RAM transport");
     return true;
+}
+
+
+/* The original worker submits, then waits for its hardware completion.
+ * Queue only behind the already admitted matching151 future frame. Never
+ * supply a software event or consume the last completed frame a second time. */
+static bool engine1540_frame_write(NikonZ9State *s, hwaddr addr, uint64_t value, unsigned size)
+{
+    unsigned bank;hwaddr base;
+    if (!s->engine1540_frame_pass_model || !raw_transport_bank(s,addr,&bank,&base) || addr!=base+8) { return false; }
+    if (size!=4 || value!=1 || s->engine1540_waiting[bank]) { goto invalid; }
+    if (s->raw_transport[bank].parameters[0x40 / 4] == 0x10009) {
+        if (engine1540_packed_conversion(s, bank)) { return true; }
+        goto invalid;
+    }
+    /* Native628 submits a new1540 request after ordered1510 reset has
+     * cancelled the earlier wait. Its exact153 producer is still queued.
+     * Admit that new request as a wait, never as a reuse of old RAW bytes.
+     * Actual completion still requires fresh151 RAM and the original ACK. */
+    unsigned producer_bank=s->engine151_capture_wait_bank;
+    uint32_t *up=s->engine151_config[0];
+    bool retained_producer=producer_bank<2 && s->engine151_capture_wait_cancels &&
+        !s->engine151_capture_waiting && !s->engine151_active[0] &&
+        !s->engine151_capture_pending && !s->engine151_pending[0] &&
+        s->engine151_capture_wait_after==s->primary_d980_frames &&
+        s->engine153_waiting[producer_bank] && !s->engine153_wait_failed[producer_bank] &&
+        s->engine153_wait_after[producer_bank]==s->primary_d980_frames &&
+        s->engine153_config[producer_bank][0xb4/4]==up[0x900/4] &&
+        s->engine153_config[producer_bank][0xb0/4]==up[0x904/4];
+    if (s->engine153_deferred_input_model &&
+        ((s->engine151_capture_waiting && !s->engine151_capture_wait_failed &&
+          s->engine151_active[0] && s->engine151_capture_wait_after==s->primary_d980_frames) ||
+         retained_producer)) {
+        if (!engine1540_transfer(s,bank,true,true)) { goto invalid; }
+        s->engine1540_waiting[bank]=true;s->engine1540_wait_failed[bank]=false;
+        s->engine1540_wait_after[bank]=s->primary_d980_frames;s->engine1540_wait_requests[bank]++;
+        return true;
+    }
+    if (engine1540_transfer(s,bank,false,false)) { return true; }
+invalid:
+    fprintf(stderr,"Z9_RAW_START_REJECT bank=%u mode=%x programmed=%x raw_frame=%"PRIu64
+        " consumed=%"PRIu64",%"PRIu64" pending151=%x active151=%u waiting151=%u"
+        " waiting_raw=%u,%u source=%x:%x target=%x:%x\n",
+        bank,s->raw_transport[bank].parameters[0x40/4],s->raw_transport[bank].reprogram_fields,
+        s->engine151_raw_output_frame,s->raw_transport[0].frame_frame,s->raw_transport[1].frame_frame,
+        s->engine151_pending[0],s->engine151_active[0],s->engine151_capture_waiting,
+        s->engine1540_waiting[0],s->engine1540_waiting[1],
+        s->raw_transport[bank].parameters[0x404/4],s->raw_transport[bank].parameters[0x400/4],
+        s->raw_transport[bank].parameters[0x424/4],s->raw_transport[bank].parameters[0x420/4]);
+    unknown_access(s,addr,value,size,true);return true;
+}
+
+static void engine1540_wait_try(NikonZ9State *s)
+{
+    for (unsigned bank=0;bank<2;bank++) {
+        if (!s->engine1540_waiting[bank] || s->engine1540_wait_failed[bank] ||
+            s->engine151_capture_waiting || s->engine151_capture_pending ||
+            s->engine151_raw_output_frame<=s->engine1540_wait_after[bank]) { continue; }
+        /* An unrelated D980 buffer may arrive first. The matching151
+         * request owns this output until ACK; validate its actual frame,
+         * source, destination and fresh consumption, not global adjacency. */
+        if (!engine1540_transfer(s,bank,false,false)) {
+            s->engine1540_wait_failed[bank]=true;continue;
+        }
+        s->engine1540_waiting[bank]=false;s->engine1540_wait_completions[bank]++;
+    }
+}
+
+static char *get_engine1540_wait_state(Object *obj, Error **errp)
+{
+    NikonZ9State *s=NIKON_Z9_LAB(obj);GString *out=g_string_new("{\"banks\":[");
+    for (unsigned b=0;b<2;b++) {
+        g_string_append_printf(out,"%s{\"waiting\":%s,\"failed\":%s,\"after_frame\":%" PRIu64
+            ",\"requests\":%" PRIu64 ",\"completions\":%" PRIu64 ",\"cancels\":%" PRIu64 "}",
+            b?",":"",s->engine1540_waiting[b]?"true":"false",s->engine1540_wait_failed[b]?"true":"false",
+            s->engine1540_wait_after[b],s->engine1540_wait_requests[b],s->engine1540_wait_completions[b],s->engine1540_wait_cancels[b]);
+    }
+    g_string_append(out,"],\"physical_timing_verified\":false}");return g_string_free(out,false);
 }
 
 static bool get_engine1540_lossless14(Object *obj,Error **errp)
@@ -16938,12 +18211,14 @@ static char *get_engine1540_frame_pass_state(Object *obj, Error **errp)
         ",\"fnv64\":%" PRIu64 ",\"readback_fnv64\":%" PRIu64 ",\"acks\":%" PRIu64
         ",\"pending\":%u,\"irq_intid\":305,\"completion_events\":%" PRIu64
         ",\"results\":[0,%u,0],\"last_result_bytes\":%u,\"physical_algorithm_verified\":false,\"native_nef_saved\":false,"
-        "\"encoding\":\"%s\",\"scope\":\"actual151 RAW DMA output; optional attributed F0 lossless14; physical codec, HE/HE* and LUT remain unverified\"}",
+        "\"encoding\":\"%s\",\"scope\":\"actual RAM output; frame0 denotes identity conversion, not capture; optional F0 is not original Nikon codec\"}",
         s->engine1540_frame_pass_model ? "true" : "false", s->raw_transport[1].frame_jobs, s->raw_transport[1].frame_bytes,
-        s->raw_transport[1].frame_source, s->raw_transport[1].frame_target, s->raw_transport[1].frame_frame,
+        s->raw_transport[1].frame_source, s->raw_transport[1].frame_target,
+        s->raw_transport[1].last_conversion ? 0 : s->raw_transport[1].frame_frame,
         s->raw_transport[1].frame_hash, s->raw_transport[1].frame_readback, s->raw_transport[1].frame_acks,
         s->raw_transport[1].frame_pending, s->raw_transport[1].frame_jobs,
         s->raw_transport[1].frame_result_bytes, s->raw_transport[1].frame_result_bytes,
+        s->raw_transport[1].last_conversion ? "packed14-identity-conversion" :
         s->engine1540_lossless14_model ? "nikon-f0-lossless14" : "packed14-transport");
 }
 
@@ -16971,7 +18246,7 @@ static bool engine1540_control_write(NikonZ9State *s, hwaddr addr, uint64_t valu
     if (size != 4 || value > UINT32_MAX || (off == 0x14 && value > 1)) {
         unknown_access(s, addr, value, size, true); return true;
     }
-    if (off == 0x14 && s->raw_transport[bank].frame_pending) {
+    if (off == 0x14 && (s->raw_transport[bank].frame_pending || s->engine1540_waiting[bank])) {
         unknown_access(s, addr, value, size, true); return true;
     }
     if (off == 0x14) { s->raw_transport[bank].interface = value; }
@@ -17266,6 +18541,11 @@ static uint64_t unknown_read(void *opaque, hwaddr addr, unsigned size)
                 return 0;
             }
         }
+    }
+    if (s->raw_pipeline_model && addr >= 0x15c00000 && addr < 0x15c00c00 &&
+        size == 4 && !(addr & 3)) {
+        unsigned word = (addr - 0x15c00000) / 4;
+        return s->raw_histogram[word / 256][word % 256];
     }
     if (engine1542_read(s, addr, size, &engine1518_value)) {
         return engine1518_value;
@@ -17994,6 +19274,11 @@ static void unknown_write(void *opaque, hwaddr addr, uint64_t value,
     }
     uint32_t *engine_init = engine_init_word(s, addr, size);
     if (engine_init) {
+        unsigned rb;hwaddr rbase;
+        if (s->engine1540_frame_pass_model && raw_transport_bank(s,addr,&rb,&rbase) &&
+            s->engine1540_waiting[rb]) {
+            unknown_access(s,addr,value,size,true);return;
+        }
         uint32_t mask = (addr & 0xffff) == 0x44 ? 0x70000 : 1;
         if (engine_150c_upper_word(s, addr, size, &mask)) {
             /* mask supplied by the native upper-block field contract */
@@ -18461,7 +19746,8 @@ static void unknown_write(void *opaque, hwaddr addr, uint64_t value,
         if (s->event1508_group_model) {
             s->event_group_latched[group] = s->event_group_1508[group];
             s->event_group_requests[group]++;
-            if (s->event_secondary_timing_model || s->event_output0_boundary_model) {
+            if (s->event_secondary_timing_model || s->event_output0_boundary_model ||
+                s->event_programmed_clock_model) {
                 /* Explicit opt-in command consumption: subsequent original
                  * read/OR/write requests must not replay historical lanes. */
                 s->event_group_1508[group] = 0;
@@ -18735,6 +20021,9 @@ static void unknown_write(void *opaque, hwaddr addr, uint64_t value,
          * IPU init entries 0x3f,0x4c..4f -> bit12 and bits25..28.
          * Original 402009e4 also releases bits29..31 as one RMW request.
          * Unmodeled devices have no active transactions to reset yet. */
+        if (!wave5_external_reset(s,addr,value)) {
+            unknown_access(s,addr,value,size,true);return;
+        }
         if (addr == 0x0d154248) {
             s->peripheral_release8 |= value;
         } else {
@@ -18958,9 +20247,11 @@ static const MemoryRegionOps unknown_ops = {
 static bool dma_ram_range(NikonZ9State *s, uint64_t addr, uint64_t bytes)
 {
     if (s->image_bank_model) {
-        for (unsigned i = 0; i < ARRAY_SIZE(image_bank_ranges); i++) {
-            uint64_t base = image_bank_ranges[i].base;
-            uint64_t end = image_bank_ranges[i].end;
+        unsigned count;
+        const ImageBankRange *ranges = image_bank_layout(OBJECT(s), &count);
+        for (unsigned i = 0; i < count; i++) {
+            uint64_t base = ranges[i].base;
+            uint64_t end = ranges[i].end;
             if (bytes && addr >= base && addr < end && bytes <= end - addr) {
                 return true;
             }
@@ -19030,9 +20321,12 @@ static void dma_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
     uint64_t src = r[0x30/4] | ((uint64_t)(r[0x34/4] & 15) << 32);
     uint64_t dst = r[0x38/4] | ((uint64_t)(r[0x3c/4] & 15) << 32);
     uint64_t rows = r[0x28/4] ? r[0x28/4] : 4096;
-    uint64_t width = r[0x20/4];
+    /* Native rectangle: source pitch, destination pitch, width, row count.
+     * Equal-pitch full frames hid the old width/destination-pitch swap.
+     * Narrow tiles need +24 width (zero encodes32768), not +20 pitch. */
+    uint64_t width = r[0x24/4] ? r[0x24/4] : 32768;
     uint64_t src_stride = r[0x1c/4];
-    uint64_t dst_stride = r[0x24/4] ? r[0x24/4] : 32768;
+    uint64_t dst_stride = r[0x20/4];
     uint64_t bytes = rows * width;
     uint64_t src_span = (rows - 1) * src_stride + width;
     uint64_t dst_span = (rows - 1) * dst_stride + width;
@@ -19041,13 +20335,24 @@ static void dma_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
     r[0] = 0;
     r[2] = 0;
     dma_irq_update(s, ch);
-    if (value != 1 || (r[0x14/4] != 0x20 && !fill) ||
+    g_autofree uint8_t *main_source=NULL;
+    uint64_t main_backing=0,main_stored=0;
+    bool plain=r[0x14/4]==0x20 || (s->video_main_model && r[0x14/4]==0);
+    int main_read=0;
+    if (!fill && plain && src_stride>=width && src_span<=64*MiB &&
+        !(r[0x34/4]&~15u) && value==1) {
+        main_read=video_main_dma_snapshot(s,src,src_span,&main_source,&main_backing,&main_stored);
+    }
+    if (value != 1 || (!plain && !fill) ||
         !width || width > 32768 || dst_stride < width ||
         (fill && (r[0x18/4] & ~255u)) ||
         bytes > 64 * MiB || !dma_ram_range(s, dst, dst_span) ||
         (r[0x34/4] & ~15u) || (r[0x3c/4] & ~15u) ||
-        (!fill && (src_stride < width || !dma_ram_range(s, src, src_span) ||
-                   (src < dst + dst_span && dst < src + src_span)))) {
+        (!fill && (src_stride < width || main_read<0 ||
+                   (main_read==0 && (!dma_ram_range(s,src,src_span) ||
+                    (src<dst+dst_span && dst<src+src_span))) ||
+                   (main_read>0 && (main_overlap(main_backing,main_stored,dst,dst_span) ||
+                    video_main_locked(s,dst,dst_span)))))) {
         unknown_access(s, physical_reg, value, size, true);
         fprintf(stderr, "Z9_DMA rejected ch=%u mode=%x src=%" PRIx64
                 " dst=%" PRIx64 " width=%" PRIu64 " rows=%" PRIu64 "\n",
@@ -19058,7 +20363,8 @@ static void dma_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
     for (uint64_t row = 0; row < rows; row++) {
         for (uint64_t n = 0; n < width; n += sizeof(page)) {
             size_t count = MIN(width - n, sizeof(page));
-            if ((!fill && address_space_read(&address_space_memory,
+            if (main_source) { memcpy(page,main_source+row*src_stride+n,count); }
+            if ((!fill && !main_source && address_space_read(&address_space_memory,
                     src + row * src_stride + n, MEMTXATTRS_UNSPECIFIED,
                     page, count) != MEMTX_OK) ||
                 address_space_write(&address_space_memory,
@@ -19433,6 +20739,9 @@ static void nikon_z9_init(MachineState *machine)
         (!s->bootstrap_fixtures || !s->engine1543_control_model)) {
         error_report("engine1543-capture-control-model requires bootstrap and1543 control"); exit(1);
     }
+    if (s->engine153_deferred_input_model && !s->engine153_alternate_bank_model) {
+        error_report("engine153 deferred input requires acknowledged alternating neutral RAW transport");exit(1);
+    }
     if (s->engine153_alternate_bank_model && !s->engine153_inplace_identity_model) {
         error_report("engine153-alternate-bank-model requires the neutral in-place model");
         exit(1);
@@ -19460,6 +20769,9 @@ static void nikon_z9_init(MachineState *machine)
     }
     if (s->engine1542_ram_input_model && !s->bootstrap_fixtures) {
         error_report("engine1542-ram-input-control-model requires bootstrap fixtures"); exit(1);
+    }
+    if (s->capture_frame_pool_model && (!s->capture_nv16_model || !s->capture_stream_rearm_model)) {
+        error_report("capture-frame-pool-model requires owned capture pipeline and receiver rearm");exit(1);
     }
     if (s->capture_stream_rearm_model && !s->capture_nv16_model) {
         error_report("capture-stream-rearm-model requires capture-nv16-pipeline-model");
@@ -19491,6 +20803,10 @@ static void nikon_z9_init(MachineState *machine)
     }
     if (s->engine15e2_config_model && !s->bootstrap_fixtures) {
         error_report("engine15e2-config-model requires bootstrap fixtures"); exit(1);
+    }
+    if (s->video_primary_input_boundary_model &&
+        (!s->video_primary_boundaries_model || !s->video_raw_transport_model)) {
+        error_report("independent input boundary requires owned RAW transport and primary boundaries");exit(1);
     }
     if (s->video_raw_transport_model && (!s->primary_d980_stream_model || !s->primary_d980_packed14_model ||
         !s->engine152c_stream_model || s->engine152c_stream_copy_model || !s->engine153_config_model ||
@@ -19646,12 +20962,14 @@ static void nikon_z9_init(MachineState *machine)
     }
     memory_region_add_subregion(mem, UINT64_C(0xa00000000), machine->ram);
     if (s->image_bank_model) {
-        for (unsigned i = 0; i < ARRAY_SIZE(image_bank_ranges); i++) {
+        unsigned count;
+        const ImageBankRange *ranges = image_bank_layout(OBJECT(s), &count);
+        for (unsigned i = 0; i < count; i++) {
             g_autofree char *name = g_strdup_printf("z9.image-bank-%u", i);
             memory_region_init_ram(&s->image_bank_ram[i], NULL, name,
-                                   image_bank_ranges[i].end - image_bank_ranges[i].base,
+                                   ranges[i].end - ranges[i].base,
                                    &error_fatal);
-            memory_region_add_subregion(mem, image_bank_ranges[i].base,
+            memory_region_add_subregion(mem, ranges[i].base,
                                         &s->image_bank_ram[i]);
         }
     }
@@ -20025,10 +21343,12 @@ static char *get_image_bank_state(Object *obj, Error **errp)
     GString *text = g_string_new(NULL);
     g_string_append_printf(text, "{\"enabled\":%s,\"software_extents_only\":true,\"ranges\":[",
                            s->image_bank_model ? "true" : "false");
-    for (unsigned i = 0; i < ARRAY_SIZE(image_bank_ranges); i++) {
+    unsigned count;
+    const ImageBankRange *ranges = image_bank_layout(obj, &count);
+    for (unsigned i = 0; i < count; i++) {
         g_string_append_printf(text, "%s{\"base\":\"0x%" PRIx64 "\",\"end\":\"0x%" PRIx64 "\"}",
-                               i ? "," : "", image_bank_ranges[i].base,
-                               image_bank_ranges[i].end);
+                               i ? "," : "", ranges[i].base,
+                               ranges[i].end);
     }
     g_string_append(text, "]}");
     return g_string_free(text, false);
@@ -20508,7 +21828,9 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc,"engine152c-stream-copy-model",get_engine152c_stream_copy_model,set_engine152c_stream_copy_model);
     object_class_property_add_str(oc,"engine152c-stream-receiver-state",get_engine152c_stream_state,NULL);
     object_class_property_add_bool(oc,"video-raw-transport-model",get_video_raw_transport_model,set_video_raw_transport_model);
+    object_class_property_add_bool(oc,"video-raw-he-codec-model",get_video_raw_he_codec_model,set_video_raw_he_codec_model);
     object_class_property_add_str(oc,"video-raw-transport-state",get_video_raw_transport_state,NULL);
+    object_class_property_add_bool(oc,"video-raw-queued-input-model",get_video_raw_queued_input_model,set_video_raw_queued_input_model);
     object_class_property_add_bool(oc,"video-forced-stop-model",get_video_forced_stop_model,set_video_forced_stop_model);
     object_class_property_add_str(oc,"video-forced-stop-state",get_video_forced_stop_state,NULL);
     object_class_property_add_bool(oc,"video-backend-drain-model",get_video_backend_drain_model,set_video_backend_drain_model);
@@ -20550,11 +21872,17 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "engine1540-alternate-bank-model", get_engine1540_alternate_bank_model, set_engine1540_alternate_bank_model);
     object_class_property_add_str(oc, "engine1540-alternate-bank-state", get_engine1540_alternate_bank_state, NULL);
     object_class_property_add_str(oc, "engine1540-frame-pass-state", get_engine1540_frame_pass_state, NULL);
+    object_class_property_add_str(oc, "engine1540-conversion-state", get_engine1540_conversion_state, NULL);
+    object_class_property_add_str(oc, "engine1540-reencode-state", get_engine1540_reencode_state, NULL);
     object_class_property_add_bool(oc, "engine153-config-model", get_engine153_config_model, set_engine153_config_model);
     object_class_property_add_str(oc, "engine153-config-state", get_engine153_config_state, NULL);
     object_class_property_add_str(oc, "engine1530-config-state", get_engine1530_config_state, NULL);
     object_class_property_add_bool(oc,"video-peripheral-control-model",get_video_peripheral_control_model,set_video_peripheral_control_model);
     object_class_property_add_str(oc,"video-peripheral-control-state",get_video_peripheral_control_state,NULL);
+    object_class_property_add_bool(oc,"engine153-deferred-input-model",get_engine153_deferred_input,set_engine153_deferred_input);
+    object_class_property_add_str(oc,"engine153-deferred-input-state",get_engine153_deferred_state,NULL);
+    object_class_property_add_str(oc,"engine151-capture-wait-state",get_engine151_capture_wait_state,NULL);
+    object_class_property_add_str(oc,"engine1540-wait-state",get_engine1540_wait_state,NULL);
     object_class_property_add_bool(oc, "engine153-frame-pass-model", get_engine153_frame_pass_model, set_engine153_frame_pass_model);
     object_class_property_add_str(oc, "engine153-frame-pass-state", get_engine153_frame_pass_state, NULL);
     object_class_property_add_bool(oc, "engine153-alternate-bank-model",
@@ -20568,6 +21896,8 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "primary-d980-state", get_primary_d980_state, NULL);
     object_class_property_add_bool(oc, "primary-reset-idle-stop-model", get_primary_reset_idle_stop_model, set_primary_reset_idle_stop_model);
     object_class_property_add_str(oc, "primary-reset-state", get_primary_reset_state, NULL);
+    object_class_property_add_bool(oc,"primary-reset-queued-start-model",get_primary_reset_queued_start_model,set_primary_reset_queued_start_model);
+    object_class_property_add_str(oc,"primary-reset-queued-start-state",get_primary_reset_queued_start_state,NULL);
     object_class_property_add_bool(oc, "primary-reset-parameter-retention-model", get_primary_reset_parameter_retention_model, set_primary_reset_parameter_retention_model);
     object_class_property_add_str(oc, "primary-reset-parameter-retention-state", get_primary_reset_parameter_retention_state, NULL);
     object_class_property_add_str(oc, "primary-metadata14c-input", NULL, set_primary_metadata14c_input);
@@ -20614,11 +21944,23 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc,"video-secondary-isp-model",get_video_secondary_isp_model,set_video_secondary_isp_model);
     object_class_property_add_str(oc,"video-secondary-isp-state",get_video_secondary_isp_state,NULL);
     object_class_property_add_bool(oc,"video-secondary-sensor-model",get_video_secondary_sensor_model,set_video_secondary_sensor_model);
+    object_class_property_add_bool(oc,"video-secondary-parallel-model",get_video_secondary_parallel_model,set_video_secondary_parallel_model);
+    object_class_property_add_bool(oc,"video-source-ram-model",get_video_source_ram_model,set_video_source_ram_model);
+    object_class_property_add_str(oc,"video-source-ram-state",get_video_source_ram_state,NULL);
+    object_class_property_add_bool(oc,"video-main-output-model",get_video_main_model,set_video_main_model);
+    object_class_property_add_str(oc,"video-main-output-state",get_video_main_state,NULL);
+    object_class_property_add_bool(oc,"event1508-programmed-clock-model",get_event_programmed_clock_model,set_event_programmed_clock_model);
+    object_class_property_add_str(oc,"event1508-programmed-clock-state",get_event_programmed_clock_state,NULL);
     object_class_property_add_str(oc,"video-secondary-sensor-state",get_video_secondary_sensor_state,NULL);
     object_class_property_add_bool(oc,"video-secondary-source-end-model",get_video_secondary_source_end_model,set_video_secondary_source_end_model);
     object_class_property_add_bool(oc,"video-receiver-before-supplier-model",get_video_receiver_before_supplier_model,set_video_receiver_before_supplier_model);
     object_class_property_add_bool(oc,"video-primary-boundaries-model",get_video_primary_boundaries_model,set_video_primary_boundaries_model);
     object_class_property_add_str(oc,"video-primary-boundaries-state",get_video_primary_boundaries_state,NULL);
+    object_class_property_add_bool(oc,"video-primary-input-boundary-model",get_video_primary_input_boundary_model,set_video_primary_input_boundary_model);
+    object_class_property_add_bool(oc,"video-raw-packet-ring-model",get_video_raw_packet_ring_model,set_video_raw_packet_ring_model);
+    object_class_property_add_bool(oc,"video-raw-receiver-banks-model",get_video_raw_receiver_banks_model,set_video_raw_receiver_banks_model);
+    object_class_property_add_str(oc,"video-raw-packet-ring-state",get_video_raw_packet_ring_state,NULL);
+
     object_class_property_add_bool(oc,"engine151-active-program-model",get_engine151_active_program_model,set_engine151_active_program_model);
     object_class_property_add_str(oc,"engine151-active-program-state",get_engine151_active_program_state,NULL);
     object_class_property_add_str(oc,"video-secondary-source-end-state",get_video_secondary_source_end_state,NULL);
@@ -20633,9 +21975,13 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_bool(oc, "engine1542-ram-input-control-model", get_engine1542_ram_input_model, set_engine1542_ram_input_model);
     object_class_property_add_str(oc, "engine1542-ram-input-control-state", get_engine1542_ram_input_state, NULL);
     object_class_property_add_bool(oc, "capture-thumbnail-nv16-model", get_capture_thumbnail_model, set_capture_thumbnail_model);
+    object_class_property_add_bool(oc,"video-preview-ram-model",get_video_preview_model,set_video_preview_model);
+    object_class_property_add_str(oc,"video-preview-ram-state",get_video_preview_state,NULL);
     object_class_property_add_str(oc, "capture-thumbnail-nv16-state", get_capture_thumbnail_state, NULL);
     object_class_property_add_bool(oc, "capture-nv16-pipeline-model", get_capture_nv16_model, set_capture_nv16_model);
     object_class_property_add_str(oc, "capture-nv16-pipeline-state", get_capture_nv16_state, NULL);
+    object_class_property_add_bool(oc,"capture-frame-pool-model",get_capture_frame_pool,set_capture_frame_pool);
+    object_class_property_add_str(oc,"capture-frame-pool-state",get_capture_frame_pool_state,NULL);
     object_class_property_add_bool(oc, "raw-pipeline-model", get_raw_pipeline_model, set_raw_pipeline_model);
     object_class_property_add_str(oc, "raw-pipeline-state", get_raw_pipeline_state, NULL);
     object_class_property_add_bool(oc, "raw-pipeline-1514-completion-model",
@@ -20675,6 +22021,8 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "serial-state", get_serial_state, NULL);
     object_class_property_add_str(oc, "serial-write-clock-peer", NULL, set_serial_write_peer);
     object_class_property_add_str(oc, "serial-write-clock-state", get_serial_write_peer_state, NULL);
+    object_class_property_add_str(oc, "serial8-write-clock-peer", NULL, set_serial8_write_peer);
+    object_class_property_add_str(oc, "serial8-write-clock-state", get_serial8_write_peer_state, NULL);
     object_class_property_add_bool(oc,"serial-audio-register-retention",get_audio_register_retention,set_audio_register_retention);
     object_class_property_add_str(oc,"serial-audio-register-state",get_audio_register_state,NULL);
     object_class_property_add_bool(oc,"serial5-audio-config-model",get_serial5_audio_config_model,set_serial5_audio_config_model);
@@ -20683,6 +22031,8 @@ static void nikon_z9_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc,"serial5-audio-idle-drain-state",get_serial5_audio_idle_drain_state,NULL);
     object_class_property_add_str(oc,"serial5-audio-sample-input",NULL,set_serial5_audio_sample_input);
     object_class_property_add_str(oc,"serial5-audio-sample-state",get_serial5_audio_sample_state,NULL);
+    object_class_property_add_str(oc,"serial5-pcm-input",NULL,set_serial5_pcm_input);
+    object_class_property_add_str(oc,"serial5-pcm-state",get_serial5_pcm_state,NULL);
     object_class_property_add_str(oc, "graphics-state", get_graphics_state, NULL);
 };
 
@@ -20698,12 +22048,18 @@ static void nikon_z9_finalize(Object *obj)
     g_free(s->statistics_raw_path);
     nikon_raw_pixels_free(s->raw_pixels);
     g_free(s->primary_d980_cache);
+    g_free(s->video_raw_packet_extra);
     if (s->primary_d980_single_timer) { timer_free(s->primary_d980_single_timer); }
     if (s->raw_pipeline_timer) {
         timer_free(s->raw_pipeline_timer);
     }
     for (unsigned i = 0; i < 3; i++) {
         g_free(s->raw_pipeline_cache[i]);
+    }
+    if (s->video_main) {
+        g_free(s->video_main->cache);
+        for (unsigned p=0;p<2;p++) { g_free(s->video_main->packed_packet[p]); }
+        g_free(s->video_main);
     }
     if (s->primary_empty_end_timer) {
         timer_free(s->primary_empty_end_timer);

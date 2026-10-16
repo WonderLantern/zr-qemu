@@ -19,18 +19,27 @@ POINTS={INIT:'ui_language_initialization',0x403fd96c:'ui_language_preference_ret
         SETTER:'ui_language_setter',0x4033a080:'ui_language_setter_stored'}
 
 
-def prepare(g,language):
-    if language!='english' or sha(MAIN)!=MAIN_SHA:raise ValueError('pinned ZR English preference required')
-    data=MAIN.read_bytes();base=0x40160000
-    group=data[0x4430a868+0x1d*0x30-base:0x4430a868+(0x1d+1)*0x30-base]
+def prepare(g,language,*,firmware=None,version='1.11'):
+    # The C1.10 descriptor tables/mapping are shifted by 16 bytes, while
+    # the checked cache, initializer and setter addresses are unchanged.
+    versions={'1.11':(MAIN_SHA,0),
+        '1.10':('d495cce73462a51b971ad25941a2deea92ccc667f127b930da00949101a51b82',16)}
+    if language!='english' or version not in versions:raise ValueError('pinned ZR English preference required')
+    source=MAIN if firmware is None else Path(firmware)
+    expected,delta=versions[version]
+    if sha(source)!=expected:raise ValueError('version-specific ZR language input identity differs')
+    data=source.read_bytes();base=0x40160000
+    group=data[0x4430a868+delta+0x1d*0x30-base:0x4430a868+delta+(0x1d+1)*0x30-base]
     start,count=struct.unpack_from('<HH',group,0x18)
-    descriptor=data[0x442e7948+start*24-base:0x442e7948+start*24-base+24]
-    if (start,count)!=(2086,228) or struct.unpack('<3Q',descriptor)!=(0x400000009,CACHE,0x4431a34c):
+    descriptor=data[0x442e7948+delta+start*24-base:0x442e7948+delta+start*24-base+24]
+    if (start,count)!=(2086,228) or struct.unpack('<3Q',descriptor)!=(0x400000009,CACHE,0x4431a34c+delta):
         raise ValueError('language getter descriptor differs')
-    mapping=data[0x42bddd24-base:0x42bddd24-base+30*8]
+    mapping=data[0x42bddd24+delta-base:0x42bddd24+delta-base+30*8]
     if dict(struct.iter_unpack('<2I',mapping)).get(4)!=1 or dict(struct.iter_unpack('<2I',mapping)).get(29)!=0:
         raise ValueError('original language mapping differs')
     g.data['ui_language_preference']=dict(language=language,code=4,locale_index=1,
+        firmware_version=version,firmware_sha256=expected,
+        baseline_code=26 if version=='1.10' else 29,
         cache_address=hex(CACHE),original_init=hex(INIT),original_setter=hex(SETTER),
         source_sha256=sha(Path(__file__)),descriptor_hex=descriptor.hex(),mapping_hex=mapping.hex(),
         classification='explicit lab cached language preference; four-byte guest RAM edit',
@@ -46,7 +55,16 @@ def observe(g,row):
         if [x.strip() for x in responses]!=[f'gpa: {address:#x}' for address in (CACHE,CACHE+3)]:
             raise ValueError('original language cache translation differs')
         before=g.read_bytes(CACHE,4)
-        if before!=struct.pack('<I',29):raise ValueError('Japanese baseline cache differs; do not guess a setting')
+        record['original_cache_hex']=before.hex()
+        if before==struct.pack('<I',4):
+            # C1.10's captured input has an English factory default. Retain
+            # the original cache and still observe its native setter below.
+            record.update(applied=True,applied_without_write=True,
+                classification='original English cache observed; no preference RAM edit',
+                translation_responses=responses)
+            return
+        if before!=struct.pack('<I',record['baseline_code']):
+            raise ValueError('Language baseline differs: '+before.hex())
         after=struct.pack('<I',4)
         (g.out/'zr-language-cache-before.bin').write_bytes(before)
         # Bypass the general prohibition only for this pinned, paused cache.

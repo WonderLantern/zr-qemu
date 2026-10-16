@@ -5,6 +5,7 @@ An original failure result should end the input recipe promptly. Success still
 requires camera source DMA, actual video files and independent full decoding.
 """
 import hashlib
+import errno
 import json
 import struct
 from pathlib import Path
@@ -46,6 +47,7 @@ def callback(row):
 class NativeVideoCallbacks:
     def __init__(self, guest):
         self.offset = 0
+        self.read_deferrals = 0
         self.results = {'start': [], 'stop': []}
         self.record = dict(enabled=False, events=[], guest_writes=False,
             scope='Original guarded callback failure detection; success is not frame/file acceptance')
@@ -79,28 +81,52 @@ class NativeVideoCallbacks:
     def failure(self, kind, ordinal):
         if not self.record['enabled']:
             return None
-        if self.path.stat().st_size < self.offset:
-            raise ValueError('Original callback trace was truncated')
-        with self.path.open('rb') as stream:
-            stream.seek(self.offset)
-            while True:
-                start = stream.tell()
-                line = stream.readline()
-                if not line:
-                    break
-                if not line.endswith(b'\n'):
-                    stream.seek(start)
-                    break
-                result = callback(json.loads(line))
-                if result is not None:
-                    events = self.results[result['kind']]
-                    if len(events) >= 8:
-                        raise ValueError('Original VIDEO callbacks exceed bounded shutter recipe')
-                    events.append(result)
-                    self.record['events'].append(result)
-            self.offset = stream.tell()
+        try:
+            if self.path.stat().st_size < self.offset:
+                raise ValueError('Original callback trace was truncated')
+            with self.path.open('rb') as stream:
+                stream.seek(self.offset)
+                while True:
+                    line = stream.readline()
+                    if not line or not line.endswith(b'\n'):
+                        break
+                    result = callback(json.loads(line))
+                    if result is not None:
+                        events = self.results[result['kind']]
+                        if len(events) >= 8:
+                            raise ValueError('Original VIDEO callbacks exceed bounded shutter recipe')
+                        events.append(result)
+                        self.record['events'].append(result)
+                    # Commit each complete record before the next read. A live
+                    # DrvFS ENODATA must not replay already consumed callbacks.
+                    self.offset = stream.tell()
+            self.read_deferrals = 0
+        except OSError as exc:
+            if exc.errno != getattr(errno, 'ENODATA', 61):
+                raise
+            self.read_deferrals += 1
+            self.record['transient_read_deferrals'] = self.record.get('transient_read_deferrals', 0) + 1
+            if self.read_deferrals > 8:
+                raise
+            # The caller's original timeout keeps running. No event, frame,
+            # success or STOP is invented while the trace is unavailable.
         events = self.results[kind]
         if len(events) < ordinal:
             return None
         result = events[ordinal-1]
         return result if result['failed'] else None
+
+    def stopped_after_start(self, ordinal):
+        """Return an observed successful STOP after this successful START.
+
+        Call after failure() has consumed the current trace. A prior clip's
+        STOP or an unsuccessful/cancelled reply cannot end this clip. The
+        caller must also observe the original selector returning to zero.
+        """
+        if not self.record['enabled'] or len(self.results['start']) < ordinal:
+            return None
+        start = self.results['start'][ordinal-1]
+        if start['result'] != 0:
+            return None
+        return next((event for event in self.results['stop']
+                     if event['index'] > start['index'] and event['result'] == 0), None)

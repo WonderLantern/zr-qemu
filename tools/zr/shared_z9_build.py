@@ -18,5 +18,10 @@ def archive(g,manifest):
         path=WORK/'qemu-10.2.4/hw/arm'/name
         if sha(path)!=digest:raise ValueError('Compiled source changed: '+name)
         (g.out/name).write_bytes(path.read_bytes())
+    for name,digest in manifest.get('he_codec_dependency',{}).get('sources',{}).items():
+        path=PUBLIC/'qemu'/name
+        if sha(path)!=digest:raise ValueError('Compiled HE source changed: '+name)
+        target=g.out/'he-runtime-source'/name;target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_bytes(path.read_bytes())
     (g.out/'shared-z9-build-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     g.data['public_build']=manifest

@@ -49,6 +49,5 @@
     ],
     "partial_format_publication_allowed": false,
     "user_release_confirmation": "H.265 与 R3D 都通过后再发布"
-  },
-  "development_snapshot_publication_authorized": "2026-10-13: latest Z9 and ZR source snapshots requested before qualified recording release"
+  }
 }

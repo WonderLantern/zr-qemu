@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "shared_revision": 221,
+  "model": "ZR",
+  "firmware": "C1.11",
+  "scope": "Portable-package functional recording; not original codec arithmetic, Z9 movie or physical-camera qualification",
+  "original_algorithms_verified": false,
+  "color_calibration_verified": false,
+  "main10_effective_source_bits": 8,
+  "proprietary_payloads_included": false,
+  "recordings": {
+    "main10": {
+      "run": "zr-native221-main10",
+      "result_sha256": "ed1a34973b1fc32c36ecea4b154407275d05e0f8f672dbfdbc028d1e948c46cc",
+      "audit_sha256": "c748f3ef4c54b75288d9c72c0363fa2bac52f79f452a2532d081ea2266ff4b41",
+      "binary_sha256": "efb038591fc58f3d5a8a85931b7ebbffb9a5fae9132b40fda652e94a771c5a3b",
+      "native_checks": 809,
+      "original_inputs_consumed": 166,
+      "whole_functional_workflow_verified": true,
+      "clips": [
+        {
+          "cycle": 1,
+          "file": "DCIM/100NIKON/DSC_0001.MOV",
+          "frames": 909,
+          "duration": "30.330300",
+          "source_acquisitions": 910,
+          "source_releases": 910,
+          "verified": true
+        },
+        {
+          "cycle": 2,
+          "file": "DCIM/100NIKON/DSC_0002.MOV",
+          "frames": 909,
+          "duration": "30.330300",
+          "source_acquisitions": 910,
+          "source_releases": 910,
+          "verified": true
+        }
+      ],
+      "roundtrips": [
+        {
+          "menu_sequence": 160,
+          "return_sequence": 162,
+          "menu_visible": true,
+          "fresh_return": true,
+          "new_raw_frames": 9,
+          "new_lcd_frames": 36,
+          "menu_sha256": "b926454570ca6ed190be83c75827e26a2fb59bd041f67eb472fd865edecc2ae3",
+          "return_sha256": "c6070277d315ed13c7cc67fd09551aa64eecdb73b82c835782297c989b89bed5",
+          "verified": true
+        },
+        {
+          "menu_sequence": 164,
+          "return_sequence": 166,
+          "menu_visible": true,
+          "fresh_return": true,
+          "new_raw_frames": 11,
+          "new_lcd_frames": 39,
+          "menu_sha256": "b926454570ca6ed190be83c75827e26a2fb59bd041f67eb472fd865edecc2ae3",
+          "return_sha256": "c6070277d315ed13c7cc67fd09551aa64eecdb73b82c835782297c989b89bed5",
+          "verified": true
+        }
+      ],
+      "fully_decoded_frames": 1818
+    },
+    "r3d": {
+      "run": "zr-native221-r3d-v2",
+      "result_sha256": "e4580ae7a88bb13708d8d9d493f4a2c137761de02e28217c075ad47f1f47cbd3",
+      "audit_sha256": "72f4215d0a8783134b82fa29e5f8c12d1ceed05fefb57d253ea7b54beb127465",
+      "binary_sha256": "efb038591fc58f3d5a8a85931b7ebbffb9a5fae9132b40fda652e94a771c5a3b",
+      "native_checks": 1027,
+      "original_inputs_consumed": 172,
+      "whole_functional_workflow_verified": true,
+      "clips": [
+        {
+          "cycle": 1,
+          "file": "DCIM/100NIKON/DSC_0001.R3D",
+          "frames": 1806,
+          "duration": "30.130100",
+          "source_acquisitions": 1836,
+          "source_releases": 1836,
+          "verified": true
+        },
+        {
+          "cycle": 2,
+          "file": "DCIM/100NIKON/DSC_0002.R3D",
+          "frames": 1803,
+          "duration": "30.080050",
+          "source_acquisitions": 1812,
+          "source_releases": 1812,
+          "verified": true
+        }
+      ],
+      "roundtrips": [
+        {
+          "menu_sequence": 166,
+          "return_sequence": 168,
+          "menu_visible": true,
+          "fresh_return": true,
+          "new_raw_frames": 8,
+          "new_lcd_frames": 42,
+          "menu_sha256": "d574331a23bc6402d80ae2a271f67044161bc5bfb2242597eae7aa61be1ce6ba",
+          "return_sha256": "8acbf575dc0be892c6b5345766a2386f93f60bbd6dd54804c162f0d94b73a137",
+          "verified": true
+        },
+        {
+          "menu_sequence": 170,
+          "return_sequence": 172,
+          "menu_visible": true,
+          "fresh_return": true,
+          "new_raw_frames": 8,
+          "new_lcd_frames": 42,
+          "menu_sha256": "d574331a23bc6402d80ae2a271f67044161bc5bfb2242597eae7aa61be1ce6ba",
+          "return_sha256": "6f6ea89e5f88fa00c909049928b27f228a5d2ba96d1fa58b3efa6cccc013c9b7",
+          "verified": true
+        }
+      ],
+      "actual_raw_frames": 3609,
+      "checked_sample_positions": 74578541400,
+      "distinct_codestreams": 1,
+      "repeat_check": "Every packet read; full byte equality permits reuse of a whole decoded image",
+      "independent_he_audit_sha256": "848d0e750715074cee2243b6aa46c51eae123f3090b7f89ad0d12daeeab342fc",
+      "red_audit_sha256": "aefdf4602d5f74434ce5bf8b8552693732c987f1619a798306073ab2758ebc20",
+      "red_images": 6,
+      "minimum_green_rank_correlation": 0.9574260305090335
+    }
+  }
+}

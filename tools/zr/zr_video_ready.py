@@ -21,3 +21,10 @@ def visible_video_ready(path,raw,scanout):
         video_frames=raw['video_frames'],sample_count=len(colors),bright_samples=bright,
         chromatic_samples=chromatic,guest_state_modified=False,
         scope='Source frame and visible colored scene; source identity, continuous video, recording and files require separate acceptance')
+
+
+def visible_video_menu(raw):
+    """Native English root menu: the selected left tab remains yellow even
+    when the focused row is disabled and grey (audio sensitivity at OFF)."""
+    from zr_key_sequence import menu_tab_matches
+    return any(menu_tab_matches(raw,tab) for tab in range(7))

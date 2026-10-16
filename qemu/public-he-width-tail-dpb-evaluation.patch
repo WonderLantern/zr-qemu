@@ -1,0 +1,82 @@
+--- a/src/decoders/nikon_he/nikon_he_subband_config.h
++++ b/src/decoders/nikon_he/nikon_he_subband_config.h
+@@ -47,7 +47,8 @@
+ // Computed once per image width, drives both passes.
+ struct LayoutInfo {
+     int ng_max;     // ceil(W / 8)
+-    int ng_LL;      // W / 4
++    int ng_LL;      // ceil(W / 4)
++    int sample_width; // actual W, independently of padded coefficient groups
+ 
+     // Per-LB ng_lift values for the 6 lift LBs (0, 1, 3, 4, 5, 7).
+     // Indexed by lift-LB-local index (0-5).
+--- a/src/decoders/nikon_he/nikon_he_subband_config.cpp
++++ b/src/decoders/nikon_he/nikon_he_subband_config.cpp
+@@ -32,7 +32,7 @@
+ void compute_subband_layout(int half_pass_W, SubbandConfig out[26]) {
+     // --- Core sizes ---
+     int ng_max = (half_pass_W + 7) / 8;   // ceil(W/8)
+-    int ng_LL  = half_pass_W / 4;
++    int ng_LL  = (half_pass_W + 3) / 4;
+     int N4     = (ng_max + 1) / 2;        // ceil(ng_max / 2)
+     int N5     = (N4 + 1) / 2;            // ceil(N4 / 2)
+     int N_H5   = N4 - N5;
+@@ -125,6 +125,7 @@
+     static LayoutInfo layout_info;
+     layout_info.ng_max = ng_max;
+     layout_info.ng_LL  = ng_LL;
++    layout_info.sample_width = half_pass_W;
+     std::memcpy(layout_info.ng_lift, ng_lift_for_hl, sizeof(ng_lift_for_hl));
+     layout_info.memcpy_LB = memcpy_LB;
+     layout_info.lift_LB   = lift_LB;
+--- a/src/decoders/nikon_he/nikon_he_idwt_horizontal.cpp
++++ b/src/decoders/nikon_he/nikon_he_idwt_horizontal.cpp
+@@ -141,7 +141,7 @@
+     const LayoutInfo* li = config[0].layout_info;
+     const int lift_LB    = li->lift_LB;
+     const int memcpy_LB  = li->memcpy_LB;
+-    const int n          = li->ng_LL * 4;       // W = ng_LL * 4 = output samples per LB
++    const int n          = li->sample_width;    // group padding is not image width
+     const int lift_st    = lift_LB * 4;
+ 
+     // Build `hl_offsets` (production convention): `levels+1` entries where
+--- a/src/decoders/nikon_he/nikon_he_bayer.cpp
++++ b/src/decoders/nikon_he/nikon_he_bayer.cpp
+@@ -59,6 +59,7 @@
+             int32_t hh_sum = p3_row[c] + p3_row[cp];
+             int32_t lh_predicted = p2_row[c] - ((hh_sum + p3_prev[c] + p3_prev[cp]) >> 3);
+             int32_t lh_next_predicted = p2_next[c] - ((hh_sum + p3_next[c] + p3_next[cp]) >> 3);
++            if (next_r == r) lh_next_predicted = lh_predicted;
+ 
+             int32_t ll_hl_sum = p1_row[c] + p4_row[c];
+             out_L[r * stride_out + c] = lh_predicted
+@@ -84,6 +85,7 @@
+             int32_t hh_sum = p3_row[c] + p3_row[cp];
+             carry_pred = p2_row[c] - ((hh_sum + p3_prev[c] + p3_prev[cp]) >> 3);
+             carry_next_pred = p2_next[c] - ((hh_sum + p3_next[c] + p3_next[cp]) >> 3);
++            if (next_r == r) carry_next_pred = carry_pred;
+         }
+ 
+         // Columns c = 1 .. w_cols - 1
+@@ -105,6 +107,7 @@
+                 - ((hh_col_sum + p3_prev[cp] + p3_prev[c]) >> 3);
+             int32_t next_predict = p2_next[c]
+                 - ((hh_col_sum + p3_next[c] + p3_next[cp]) >> 3);
++            if (next_r == r) next_predict = cur_predict;
+ 
+             int32_t ll_hl_col_sum = p1_row[c] + p4_row[c];
+             out_L[r * stride_out + c] = cur_predict
+--- a/src/decoders/nikon_he/nikon_he_precinct_decode.cpp
++++ b/src/decoders/nikon_he/nikon_he_precinct_decode.cpp
+@@ -48,8 +48,9 @@
+ // Mapping from sub-band to Dpb index (16 primary + 12 secondary = 28).
+ // Primary (sb 0-15): Dpb[0-15]; Secondary (sb 16-25): Dpb[16-25].
+ static int sb_to_dpb_index(int sb) {
+-    if (sb < 16) return sb;
+-    if (sb < 26) return 16 + (sb - 16);
++    if (sb < 23) return sb;
++    if (sb == 23) return 12;
++    if (sb < 26) return sb - 1;
+     return 0;
+ }
+ 

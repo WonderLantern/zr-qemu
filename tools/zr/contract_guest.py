@@ -12,7 +12,8 @@ import shutil
 import struct
 import subprocess
 import time
-from probe import HERE, WORK, MAIN, MAIN_SHA, QMP, sha
+from probe import HERE, WORK, MAIN, MAIN_SHA, sha
+from buffered_qemu_transport import QMP, BUFFER_BYTES
 
 
 class ContractGuest:
@@ -25,7 +26,7 @@ class ContractGuest:
         if accelerator not in (None, 'qtest'):
             raise ValueError('unsupported diagnostic accelerator')
         self.accelerator = accelerator
-        if os.name == 'nt' or os.environ.get('WSL_DISTRO_NAME') == 'ubuntu-noble':
+        if (os.name=='nt' or os.environ.get('WSL_DISTRO_NAME')=='ubuntu-noble'):
             raise RuntimeError('only ubuntu-noble-nikon is authorized')
         firmware = Path(firmware)
         if machine not in ('nikon-z9-lab', 'nikon-zr-lab'):
@@ -61,7 +62,11 @@ class ContractGuest:
                          machine=machine, main_sha256=firmware_sha, qemu_sha256=sha(exe),
                          board_sha256=sha(board_source),
                          harness_sha256=sha(Path(__file__)), checks=[], calls=[], irq_events=[],
-                         diagnostic='native boot with explicit external inputs; no CPU call redirection')
+                         diagnostic='native external inputs; no CPU call redirection')
+        transport=HERE/'buffered_qemu_transport.py'
+        (self.out/transport.name).write_bytes(transport.read_bytes())
+        self.data['host_transport']=dict(qmp_read_buffer_bytes=BUFFER_BYTES,qtest_read_buffer_bytes=BUFFER_BYTES,
+            source_sha256=sha(transport),scope='Flushed commands and buffered reply reads; same protocol, virtual time and guest inputs')
         self.data['board_includes']={}
         for filename in ('nikon-raw-pixels.h','nikon-z9-pixels.h'):
             source=work/'qemu-10.2.4/hw/arm'/filename
@@ -89,11 +94,12 @@ class ContractGuest:
             # Allow only the startup handshake extra time; ordinary commands
             # keep their existing three-second bound.
             self.qmp = QMP(self.runtime/'qmp.sock',startup_timeout=15)
+            self.data['qmp_command_timing'] = self.qmp.command_timing
             self.data['qmp_startup_timeout_seconds']=15
             self.qt = socket.socket(socket.AF_UNIX)
             self.qt.settimeout(3)
             self.qt.connect(str(self.runtime/'qtest.sock'))
-            self.fp = self.qt.makefile('rwb', buffering=0)
+            self.fp = self.qt.makefile('rwb', buffering=BUFFER_BYTES)
             if self.accelerator != 'qtest':
                 self.gdb = socket.socket(socket.AF_UNIX)
                 self.gdb.settimeout(3)
@@ -113,6 +119,7 @@ class ContractGuest:
 
     def qt_command(self, command):
         self.fp.write(command.encode()+b'\n')
+        self.fp.flush()
         while True:
             reply = self.fp.readline().decode().strip()
             if not reply.startswith('IRQ '):

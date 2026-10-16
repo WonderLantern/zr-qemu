@@ -44,17 +44,27 @@ def snapshot_raw_producer(guest, side, cycle):
             prefix='engine151-raw-side-' if job==1 else 'engine151-raw-side-job'+str(job)+'-'
             path=guest.out/(prefix+key+'.bin')
             if path.exists():raise ValueError('Preserve each actual RAW producer snapshot')
-            reply=guest.qmp.hmp(f'pmemsave {side[key]:#x} {amount:#x} "{path}"')
-            if reply:raise RuntimeError(reply)
-            if path.stat().st_size!=amount:raise ValueError('Incomplete per-photo RAW producer')
+            from host_capture_file import memory
+            memory(guest,side[key],amount,path)
             files[key]=path.name
     finally:
         guest.qmp.sock.settimeout(timeout)
+    stages=guest.data.get('mode_key_waveform',{}).get('stages',[])
+    input_sequence=stages[-1].get('sequence_id') if stages else None
     entry=dict(job=job,cycle=cycle,bytes=amount,files=files,state=side,
+        input_sequence_id=input_sequence,
         scope='actual complete RAM at original ISR after W1C, before original callback; not native file')
     previous.append(entry)
     if job==1:guest.data['raw_side_native_dump']=entry
     (guest.out/Path(__file__).name).write_bytes(Path(__file__).read_bytes())
+    # Preserve attribution even when the host is interrupted before __exit__.
+    # This partial receipt is never a substitute for the whole-workflow audit.
+    progress=guest.out/'raw-side-progress.json'
+    temporary=progress.with_suffix('.tmp')
+    temporary.write_text(json.dumps(dict(raw_side_native_dumps=previous,
+        complete=False, scope='Partial acknowledged RAM evidence only; not capture acceptance'),
+        indent=2)+'\n')
+    temporary.replace(progress)
     return entry
 
 

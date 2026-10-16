@@ -146,6 +146,40 @@ static void dsp_motion_complete(void *opaque)
 {
     WlDspBootChannel *d = opaque; WlMotionJob *m = &d->motion;
     if (!m->scheduled || d->reset_held) { return; }
+    if (m->opcode == 0x18) {
+        WlMovingWork *w = &m->moving;
+        static const unsigned bpp[8] = {1, 1, 4, 2, 2, 2, 2, 2};
+        uint8_t planes[8][4096], tail[16], scratch[2048];
+        moving_compute(w, planes, tail, scratch);
+        uint64_t written = 0;
+        for (unsigned plane = 0; plane < 8; plane++) {
+            for (unsigned row = 0; row < 32; row++) {
+                unsigned bytes = 32 * bpp[plane];
+                if (address_space_write(&address_space_memory,
+                        w->destinations[plane] + row * w->pitches[plane], MEMTXATTRS_UNSPECIFIED,
+                        planes[plane] + row * bytes, bytes) != MEMTX_OK) { goto moving_failed; }
+                written += bytes;
+            }
+        }
+        if (address_space_write(&address_space_memory, w->workspace, MEMTXATTRS_UNSPECIFIED,
+                scratch, sizeof(scratch)) != MEMTX_OK ||
+            address_space_write(&address_space_memory, m->result + 0xc0, MEMTXATTRS_UNSPECIFIED,
+                tail, sizeof(tail)) != MEMTX_OK) { goto moving_failed; }
+        m->result_crc = crc32(0, tail, sizeof(tail));
+        for (unsigned i = 0; i < 2; i++) { g_free(w->input[i]); w->input[i] = NULL; }
+        m->completed++; m->bytes_read += m->input_bytes;
+        m->bytes_written += written + sizeof(scratch) + sizeof(tail);
+        m->features = w->valid_cells; m->tracks = w->foreground_cells;
+        m->inliers = 0; m->dx = m->dy = 0;
+        m->scheduled = false; m->ready = true;
+        dsp_motion_try_reply(d);
+        return;
+moving_failed:
+        m->scheduled = false;
+        for (unsigned i = 0; i < 2; i++) { g_free(w->input[i]); w->input[i] = NULL; }
+        unknown_access(d->owner, wl_dsp_mailboxes[d->channel] + 0x108, 1, 4, true);
+        return;
+    }
     uint8_t result[WL_MOTION_RESULT_BYTES] = {0};
     motion_compute(m, result);
     if (address_space_write(&address_space_memory, m->result, MEMTXATTRS_UNSPECIFIED,
@@ -209,6 +243,91 @@ static bool dsp_motion_submit(NikonZ9State *s, WlDspBootChannel *d,
     m->requests++; m->scheduled = true;
     /* Functional host job deadline, independent of CEVA instruction/pause
      * timing. TX confirmation remains transport, never numerical completion. */
+    timer_mod(m->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + WL_DSP_BOOT_DELAY_NS);
+    return true;
+}
+static bool dsp_moving_submit(NikonZ9State *s, WlDspBootChannel *d,
+                              const uint32_t *words, uint32_t written)
+{
+    WlMotionJob *m = &d->motion;
+    WlMovingWork work = {0};
+    uint8_t input[0x50], output[0xd0];
+    uint64_t config, result;
+    static const unsigned bpp[8] = {1, 1, 4, 2, 2, 2, 2, 2};
+    m->reject = 18;
+    if (!s->dsp_motion_functional_model || d->channel != 1 || written != 15 ||
+            words[0] != 0x18 || words[3] > 1 || m->scheduled || m->ready || m->rx ||
+            d->init_scheduled || d->init_ready || d->rx_is_init ||
+            !dsp_session_ram_address(s, 1, words[1], sizeof(input), &config) ||
+            !dsp_session_ram_address(s, 1, words[2], sizeof(output), &result) ||
+            address_space_read(&address_space_memory, config, MEMTXATTRS_UNSPECIFIED,
+                input, sizeof(input)) != MEMTX_OK ||
+            address_space_read(&address_space_memory, result, MEMTXATTRS_UNSPECIFIED,
+                output, sizeof(output)) != MEMTX_OK) { return false; }
+    m->reject = 19;
+    work.center_x = ldl_le_p(input + 0x30); work.center_y = ldl_le_p(input + 0x34);
+    work.workspace_bytes = ldl_le_p(input + 0x40);
+    work.hint_x = (int16_t)lduw_le_p(input + 0x44);
+    work.hint_y = (int16_t)lduw_le_p(input + 0x46);
+    work.threshold = lduw_le_p(input + 0x48);
+    if (work.center_x < 64 || work.center_y < 64 ||
+            abs(work.hint_x) > 32 || abs(work.hint_y) > 32 ||
+            !work.threshold || work.threshold > 255 ||
+            lduw_le_p(input + 0x4a) || lduw_le_p(input + 0x4c) ||
+            lduw_le_p(input + 0x4e) > 2 || work.workspace_bytes != 0x100000 ||
+            ldq_le_p(input + 0x38) > UINT32_MAX ||
+            !dsp_session_ram_address(s, 1, ldq_le_p(input + 0x38),
+                work.workspace_bytes, &work.workspace)) { return false; }
+    uint64_t addresses[13] = {config, result, work.workspace};
+    uint32_t lengths[13] = {sizeof(input), sizeof(output), work.workspace_bytes};
+    for (unsigned image = 0; image < 2; image++) {
+        const uint8_t *p = input + image * 0x18;
+        unsigned width = ldl_le_p(p + 8), height = ldl_le_p(p + 12), stride = ldl_le_p(p + 16);
+        m->reject = 20;
+        if (ldq_le_p(p) > UINT32_MAX || ldl_le_p(p + 20) ||
+                width > 4096 || height > 4096 || width < 128 || height < 128 ||
+                stride < width || stride > 8192 ||
+                work.center_x > width - 64 || work.center_y > height - 64 ||
+                (uint64_t)stride * height > 8 * MiB ||
+                !dsp_session_ram_address(s, 1, ldq_le_p(p), stride * height,
+                    &work.sources[image])) { return false; }
+        work.widths[image] = width; work.heights[image] = height; work.strides[image] = stride;
+        addresses[3 + image] = work.sources[image]; lengths[3 + image] = stride * height;
+    }
+    for (unsigned plane = 0; plane < 8; plane++) {
+        const uint8_t *p = output + plane * 0x18;
+        unsigned pitch = ldl_le_p(p + 16);
+        m->reject = 21;
+        if (ldq_le_p(p) > UINT32_MAX || ldl_le_p(p + 8) != 32 || ldl_le_p(p + 12) != 32 ||
+                ldl_le_p(p + 20) || pitch < 32 * bpp[plane] || pitch > 512 ||
+                !dsp_session_ram_address(s, 1, ldq_le_p(p), pitch * 32,
+                    &work.destinations[plane])) { return false; }
+        work.pitches[plane] = pitch;
+        addresses[5 + plane] = work.destinations[plane]; lengths[5 + plane] = pitch * 32;
+    }
+    m->reject = 22;
+    for (unsigned i = 0; i < 13; i++) {
+        for (unsigned j = i + 1; j < 13; j++) {
+            /* Two read-only input images may intentionally share storage. */
+            if (i == 3 && j == 4) { continue; }
+            if (dsp_session_overlap(addresses[i], lengths[i], addresses[j], lengths[j])) { return false; }
+        }
+    }
+    m->reject = 23;
+    uint32_t checksum = 0;
+    for (unsigned image = 0; image < 2; image++) {
+        work.input[image] = g_malloc(lengths[3 + image]);
+        if (address_space_read(&address_space_memory, work.sources[image], MEMTXATTRS_UNSPECIFIED,
+                work.input[image], lengths[3 + image]) != MEMTX_OK) {
+            g_free(work.input[0]); g_free(work.input[1]); return false;
+        }
+        checksum = crc32(checksum, work.input[image], lengths[3 + image]);
+    }
+    m->moving = work; m->config = config; m->result = result; m->workspace = work.workspace;
+    m->source = work.sources[0]; m->width = work.widths[0]; m->height = work.heights[0];
+    m->stride = work.strides[0]; m->input_bytes = lengths[3] + lengths[4]; m->result_bytes = 0xd0;
+    m->input_crc = checksum; m->opcode = words[0]; m->group = words[3]; m->reject = 0;
+    m->requests++; m->scheduled = true;
     timer_mod(m->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + WL_DSP_BOOT_DELAY_NS);
     return true;
 }
@@ -552,7 +671,9 @@ static bool dsp_boot_mailbox_access(NikonZ9State *s, hwaddr addr,
                 !d->tx_written[slot] || (d->tx_written[slot] & (d->tx_written[slot] + 1))) {
                 goto invalid;
             }
-            if (s->dsp_motion_functional_model && d->channel == 1 &&
+            if (s->dsp_motion_functional_model && d->channel == 1 && d->tx[slot][0] == 0x18) {
+                if (!dsp_moving_submit(s, d, d->tx[slot], d->tx_written[slot])) { goto invalid; }
+            } else if (s->dsp_motion_functional_model && d->channel == 1 &&
                     (d->tx[slot][0] == 0x1a || d->tx[slot][0] == 0x1b)) {
                 if (!dsp_motion_submit(s, d, d->tx[slot], d->tx_written[slot])) { goto invalid; }
             } else if (s->dsp_correction_init_model && !d->channel &&

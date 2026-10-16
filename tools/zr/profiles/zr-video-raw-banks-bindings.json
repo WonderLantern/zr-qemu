@@ -1,0 +1,191 @@
+{
+  "firmware_sha256": "9ac53c082e1d7cc841c458465c08bb49223b36cf9d381b8206076751d7b42c8f",
+  "frame_queue_observation": {
+    "scope": "Original movie-frame preparation caller only. Other UI and RTOS queues are outside this observation scope; no guest execution or memory changes.",
+    "query_call": "0x4108644c -> 0x40e7a9bc",
+    "query_return": "0x41086450",
+    "take_call": "0x41086458 -> 0x40e7ae10",
+    "take_return_and_store": "0x4108645c",
+    "queue_address": "0xa03df1548",
+    "previous_global_helper_entries": [
+      "0x40e7a9bc",
+      "0x40e7ae10"
+    ],
+    "reason": "The helpers serve unrelated UI/RTOS queues; recording every invocation exhausted the whole-workflow trace in run552 and dominates early run553 records. Observe all accesses at the actual frame-preparation call sites instead; existing actor/wait/frame-store points remain."
+  },
+  "maximum_records": 65536,
+  "skip_x0": {
+    "native_source_input_event": "0x041d0001"
+  },
+  "raw_supplier_observation": {
+    "omitted_redundant_proxy_points": [
+      "video_framework_queue_put_call",
+      "video_framework_queue_put",
+      "video_framework_picture_pump",
+      "video_framework_source_register",
+      "video_framework_encode_request",
+      "encoder_request_adapter",
+      "encoder_request_signal",
+      "encoder_request_signal_post",
+      "encoder_worker_dispatch",
+      "encoder_worker_picture_call",
+      "process_movie_feature_check",
+      "raw_movie_feature_check"
+    ],
+    "reason": "Keep the existing 128-point/10-region bound while adding upstream RAW ownership evidence.",
+    "scope": "Static paths are candidates until their original executions are observed; no state repair or forced success."
+  },
+  "points": {
+    "app_video_started_callback": "0x40f72f2c",
+    "native_video_start_enter": "0x411a1ce0",
+    "native_video_stop_enter": "0x411a1e70",
+    "native_video_start_failure_cleanup": "0x411a9cd8",
+    "native_video_stop_finish": "0x411b0f40",
+    "app_video_stopped_callback": "0x40f72f80",
+    "app_video_stop_reason_40f720f8": "0x40f720f8",
+    "app_video_stop_reason_40f725f0": "0x40f725f0",
+    "app_video_stop_reason_40f734b4": "0x40f734b4",
+    "app_video_stop_reason_40f73f7c": "0x40f73f7c",
+    "app_video_request_message": "0x40f72c9c",
+    "app_video_request_stop_dispatch": "0x40f72d2c",
+    "native_mux_fatal_40f1b278": "0x40f1b278",
+    "native_mux_fatal_40f1bad0": "0x40f1bad0",
+    "native_mux_fatal_40f1bda0": "0x40f1bda0",
+    "native_mux_fatal_40f1c158": "0x40f1c158",
+    "native_mux_fatal_40f1c210": "0x40f1c210",
+    "native_mux_fatal_40f1cf30": "0x40f1cf30",
+    "native_mux_fatal_40f1dc34": "0x40f1dc34",
+    "native_mux_fatal_40f1dce0": "0x40f1dce0",
+    "native_mux_fatal_40f1ddb0": "0x40f1ddb0",
+    "native_mux_fatal_40f1de7c": "0x40f1de7c",
+    "native_record_launch": "0x411bd4a0",
+    "native_record_launch_result": "0x411bd500",
+    "native_image_mode_dispatch": "0x4116e9f8",
+    "native_image_mode_branch": "0x4116ea3c",
+    "native_image_ready_client_start": "0x4115b010",
+    "native_image_close_result": "0x4116ea8c",
+    "native_encoder_open_result": "0x402ff754",
+    "native_encoder_configure_result": "0x402ff7b0",
+    "native_encoder_header_result": "0x402ff7f4",
+    "native_encoder_header_copy": "0x402ff950",
+    "native_codec_error": "0x40eac7f0",
+    "native_encoder_open_enter": "0x40e32fc4",
+    "native_encoder_configure_enter": "0x40e333f0",
+    "native_encoder_header_wait_result": "0x40e386bc",
+    "native_encoder_worker_header": "0x40e3c810",
+    "native_vdi_create": "0x40e57cb8",
+    "native_vdi_headers": "0x40e59dac",
+    "native_encoder_worker_header_dispatch": "0x40e3c708",
+    "native_vdi_initialize_return": "0x40e34ae4",
+    "native_codec_allocate_return": "0x402fdd14",
+    "native_codec_boot_result": "0x40e32d68",
+    "native_vdi_core_pc_query": "0x40e53c60",
+    "source0_data_wait": "0x41086c18",
+    "source0_data_wait_return": "0x41086c1c",
+    "source_pipeline_data_wait": "0x4108688c",
+    "source_pipeline_data_return": "0x41086890",
+    "main_source_buffer_wait": "0x4108465c",
+    "main_source_buffer_return": "0x41084660",
+    "raw_frame_reader": "0x4108af18",
+    "raw_frame_deref": "0x4108af28",
+    "raw_descriptor_query": "0x4108644c",
+    "raw_descriptor_query_return": "0x41086450",
+    "raw_descriptor_take": "0x41086458",
+    "raw_movie_queue_put": "0x40f32650",
+    "raw_movie_queue_put_return": "0x40f32654",
+    "raw_movie_frame_peek": "0x40f32894",
+    "raw_movie_frame_peek_return": "0x40f32898",
+    "raw_movie_frame_take": "0x40f328e0",
+    "raw_movie_frame_take_return": "0x40f328e4",
+    "raw_movie_codec_queue_put": "0x40f32920",
+    "raw_movie_codec_queue_put_return": "0x40f32924",
+    "raw_movie_filter_release": "0x40f32b5c",
+    "raw_movie_filter_release_return": "0x40f32b60",
+    "raw_supplier_prepare": "0x4107ce88",
+    "raw_supplier_count_return": "0x4107ced0",
+    "raw_supplier_frame_call": "0x4107cee8",
+    "raw_supplier_frame_return": "0x4107ceec",
+    "raw_supplier_ready_take_return": "0x4107cff4",
+    "raw_supplier_ready_put": "0x4107d000",
+    "raw_supplier_ready_put_return": "0x4107d004",
+    "raw_supplier_pool_result": "0x41243970",
+    "raw_supplier_mode_result": "0x4124397c",
+    "raw_supplier_alloc_result": "0x412439cc",
+    "raw_supplier_kind_check": "0x4107cea0",
+    "raw_supplier_generic_enter": "0x4107cf34",
+    "raw_supplier_generic_count_return": "0x4107cf68",
+    "raw_supplier_generic_frame_call": "0x4107d06c",
+    "raw_supplier_generic_frame_return": "0x4107d070",
+    "source_prepare_data_wait": "0x41085f18",
+    "source_prepare_data_return": "0x41085f1c",
+    "source_prepare_wait": "0x4108657c",
+    "source_prepare_return": "0x41086580",
+    "source_prepare_end_wait": "0x41086638",
+    "source_prepare_end_return": "0x4108663c",
+    "source_stage_wait": "0x410863dc",
+    "source_stage_return": "0x410863e0",
+    "source_frame_wait": "0x410841f8",
+    "source_frame_return": "0x410841fc",
+    "source_stage_producer": "0x4107d148",
+    "source_frame_complete_signal": "0x41081e84",
+    "source_frame_retire_signal": "0x410820e8",
+    "native_source_input_event": "0x4107aa00",
+    "native_primary_image_input_dispatch": "0x412aa2d0",
+    "raw_movie_data_ring_submit": "0x40f32dc0",
+    "raw_receiver_result_query": "0x40e313cc",
+    "raw_receiver_slot_update": "0x40e3133c"
+  },
+  "memory": {
+    "codec_driver_state": {
+      "address": "0xa02efa4f0",
+      "bytes": 320
+    },
+    "codec_worker_state": {
+      "address": "0xa02efcb00",
+      "bytes": 160
+    },
+    "stack": {
+      "register": 31,
+      "bytes": 176
+    },
+    "native_x0_argument": {
+      "register": 0,
+      "bytes": 1056
+    },
+    "source_stage_register19": {
+      "register": 19,
+      "bytes": 2816
+    },
+    "source_pipeline_worker_parameters": {
+      "register": 23,
+      "bytes": 2816
+    },
+    "raw_movie_state": {
+      "address": "0xa033ced78",
+      "bytes": 1024
+    },
+    "native_x2_argument": {
+      "register": 2,
+      "bytes": 176
+    },
+    "source_native_event_globals": {
+      "address": "0xa03df3d80",
+      "bytes": 32
+    },
+    "raw_descriptor_register8": {
+      "register": 8,
+      "bytes": 192
+    }
+  },
+  "scope": "Read-only continuous REC lifecycle/codec/source/raw supplier/queue ownership. Drops per-node graph tracing and general context-write watch; full source/file/decoder/recovery acceptance unchanged. Actual658source kinds7/10 use generic pool branch, not type12 pool63; generic count/frame call-return and original stack/context are observed without guest modification. Native665: successful generic allocations4per kind7/10 froma03def068. Stack region reduced512->176 because actualSP fec0 crosses a guard at+512; unknown memory remains null. Existing safe X2/176 snapshots independently retained preceding returned descriptors. No runtime state changes. Split input candidate: retain actual source frame/preparation waits and source2dispatch, filter high-frequency source1 at dispatcher; retain actual input2/output3 and other bound events. Captures actual source parameter39c without guessing format from prefix; retains10region bound. No software event injection.",
+  "provenance": {
+    "base": "zr-video-native-raw-supplier-bindings.json",
+    "codec": "zr-video-codec-reset-bindings.json",
+    "reason": "Native658 emitted141MB graph traversal before first REC; keep bounded lifecycle and real source/queue boundary observations."
+  },
+  "raw_buffer_ownership_observation": {
+    "scope": "Read-only complete raw producer, CPU descriptor+0x40, movie queue admission/filter and receiver slot/result calls. No MMIO results or consumer release synthesized. Register8 is meaningful as a descriptor only at original raw_frame_deref; other points retain uninterpreted bytes. Idle filter gates alreadyobserved673; omit highfrequency repeatedentries butretain actual RAWqueue/consumer/slot/result observations.",
+    "region_replaced": "argument1 dynamic region replaced by bounded192-byte register8 view; all codec/native error counters and existing source points retained.",
+    "known_bounded_queue_question": "Original filter at40f32770 considers total queue<=6 then gate+58;672has3successful RAW puts and zero peeks so far. Determine actual RAM endpoints and recycling, do not free packet from queue counts."
+  }
+}

@@ -10,6 +10,53 @@ from pathlib import Path
 import time
 
 
+class OriginalCPUExceptionGuard:
+    """Stop a failed run after the pinned observer preserves CPU context."""
+    def __init__(self):
+        self.cursor=0
+        self.exception=None
+
+    def poll(self,rows):
+        if self.exception is not None:return self.exception
+        if len(rows)<self.cursor:raise ValueError('Original observer journal was truncated')
+        for row in rows[self.cursor:]:
+            if row.get('name')=='fault_cpu_exception_context':
+                tail=row.get('context_tail_words',[])
+                self.exception=dict(cpu=row['cpu'],observer_pc=row['pc'],
+                    original_pc=tail[1] if len(tail)>=2 else None,
+                    virtual_ns=row.get('virtual_ns'),context_address=row.get('context_address'),
+                    scope='Original CPU exception observed; context retained; workflow failed, cause requires analysis')
+                break
+        self.cursor=len(rows)
+        return self.exception
+
+
+class OriginalCaptureWatchdogGuard:
+    """Fail a bounded capture at an observed native watchdog, between QMP calls.
+
+    The observer has already saved task/context evidence before publishing the
+    row. Raising in the service loop keeps final QMP snapshots usable, unlike
+    asynchronously interrupting a socket read. This never reports a pass.
+    """
+    def __init__(self):
+        self.cursor = 0
+        self.failure = None
+
+    def poll(self, rows):
+        if self.failure is not None:
+            return self.failure
+        if len(rows) < self.cursor:
+            raise ValueError('Original observer journal was truncated')
+        for row in rows[self.cursor:]:
+            if row.get('name') == 'sequence_flow_watchdog_expired':
+                self.failure = {k: row[k] for k in
+                    ('name', 'pc', 'cpu', 'watchdog_flag_hex') if k in row}
+                self.failure['scope'] = 'Original capture watchdog; failed workflow, preserved context, no completion synthesized'
+                break
+        self.cursor = len(rows)
+        return self.failure
+
+
 class NativeLogGuard:
     TOKEN=b'Z9_UNKNOWN'
 

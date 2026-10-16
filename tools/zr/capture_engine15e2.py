@@ -54,12 +54,17 @@ def capture(guest, *, model='zr'):
     state=json.loads(guest.qmp.command('qom-get',path='/machine',property='engine15e2-jpeg-state'))
     report['jpeg']=state
     bank=0
-    if guest.data.get('engine15e2_observed_drivers'):
-        bank=observe(guest)['bank']
-    elif guest.data.get('probe_arguments',{}).get('capture_transition_batch'):
+    if guest.data.get('probe_arguments',{}).get('capture_transition_batch'):
         ports=json.loads(guest.qmp.command('qom-get',path='/machine',property='engine15e2-alternate-bank-state'))
         bank=ports['active_bank']
         report['configured_request_bank_source']='actual shared codec active-bank state'
+    elif guest.data.get('engine15e2_observed_drivers'):
+        bank=observe(guest)['bank']
+        report['configured_request_bank_source']='last observed ISR driver; active bank unavailable'
+    # An unsuccessful START can select the other port without reaching its
+    # ISR. The last completed driver's bank then describes an older image,
+    # not the request whose input needs inspection (native635).
+    report['configured_request_bank']=bank
     fields=json.loads(guest.qmp.command('qom-get',path='/machine',property='engine15e2-config-state'))['banks'][bank]['fields']
     current=dict(width=fields[0x418//4],height=fields[0x41c//4],y_stride=fields[0x410//4],
         uv_stride=fields[0x414//4],y=fields[0x430//4]<<4,uv=fields[0x434//4]<<4,

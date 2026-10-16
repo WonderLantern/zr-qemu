@@ -17,8 +17,9 @@ def main():
     p.add_argument('--raw',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--profile',choices=('preview','photo','main10','r3d'),default='preview')
+    p.add_argument('--deduplicated-card',action='store_true',help='Optional lossless host card storage; install fusepy/libfuse and use a Linux build filesystem')
     p.add_argument('--audit',action='store_true',help='After photo capture, audit actual card and independently decode every RAW sample')
-    p.add_argument('--seconds',type=int,choices=(10,20,30,60,90,180,360,600,900),help='Override the native profile observation duration')
+    p.add_argument('--seconds',type=int,choices=(10,20,30,60,90,180,360,600,900,1500),help='Override the native profile observation duration')
     a=p.parse_args()
     if a.audit:
         if a.profile!='photo':p.error('--audit currently requires --profile photo')
@@ -34,11 +35,12 @@ def main():
     manifest=json.loads((ROOT/'.local/build-manifest.json').read_text())
     work=Path(manifest['binary']).resolve().parents[1]
     names=dict(preview='zr-native-preview.json',photo='zr-native-lossless14-repeated-raw-whole.json',
-        main10='zr-native-functional-main10-running-isp-recording.json',r3d='zr-native-functional-r3d-running-isp-recording.json')
+        main10='zr-native-main10-shared221.json',r3d='zr-native-r3d-he-whole.json')
     profile=ROOT/'tools/zr/profiles'/names[a.profile]
     options=dict(json.loads(profile.read_text())['arguments'],name='zr-'+output.name,
         raw_input=str(raw))
     if a.seconds is not None:options['post_seconds']=a.seconds
+    if a.deduplicated_card:options['deduplicated_card']=True
     if options.get('lifecycle_observer'):options['lifecycle_observer']=str(profile.parent/options['lifecycle_observer'])
     env=dict(os.environ,WL_ZR_FIRMWARE=str(firmware),WL_ZR_RESOURCES=str(resources),
         WL_ZR_OUTPUT=str(output),WL_ZR_WORK=str(work),PYTHONDONTWRITEBYTECODE='1')
@@ -47,7 +49,7 @@ def main():
         if value is None or value is False:continue
         argv.append('--'+key.replace('_','-'))
         if value is not True:argv.append(str(value))
-    print('Experimental '+a.profile+' workflow; video start callbacks are not recording acceptance.',flush=True)
+    print('Native '+a.profile+' workflow; qualify complete output files and fresh recovery independently.',flush=True)
     completed=subprocess.run(argv,env=env)
     print('Private run output: '+str(output),flush=True)
     if completed.returncode==0 and a.audit:

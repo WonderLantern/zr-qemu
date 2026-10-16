@@ -462,7 +462,8 @@ class Observer:
                         self.g.rsp(f'Z1,{callback:x},4')
                 if row['name']=='capture15e2_callback':
                     if (self.g.data.get('probe_arguments',{}).get('capture_pipeline')
-                            and len(self.g.data.get('jpeg_completed_native_dumps',[]))<24
+                            and len(self.g.data.get('jpeg_completed_native_dumps',[]))<(
+                                512 if self.g.data.get('probe_arguments',{}).get('mode_burst_min_frames',0) else 24)
                             and 0x40e0caf8 not in self.points):
                         self.points[0x40e0caf8]='capture15e2_isr'
                         self.g.rsp('Z1,40e0caf8,4')
@@ -497,6 +498,15 @@ class Observer:
                     if callback not in self.points:
                         self.points[callback]='capture151_callback'
                         self.g.rsp(f'Z1,{callback:x},4')
+                if (row['name']=='capture151_callback'
+                        and self.g.data.get('probe_arguments',{}).get('capture_raw_pipeline')
+                        and len(self.g.data.get('raw_side_native_dumps',[]))<64
+                        and 0x40e0db90 not in self.points):
+                    # Keep the original after-W1C stop for each producer in a
+                    # held burst; rearming only at the next button misses all
+                    # subsequent frames in the same hold. No guest writes.
+                    self.points[0x40e0db90]='capture151_isr_after_w1c'
+                    self.g.rsp('Z1,40e0db90,4')
             if row['name'].startswith('frame_pass_'):
                 from capture_engine153 import observe
                 row['engine153_observation']=observe(self.g,model='zr')
@@ -1193,8 +1203,28 @@ class Observer:
                     row.update(event_object=hex(regs['X00']),mask=hex(regs['X01']&0xffffffff),
                                timeout_argument=regs['X03']&0xffffffff)
                 if row['name']=='primary_source_boundary_wait':
-                    self.points[0x412aa7b4]='primary_source_boundary_notify_after_wait'
-                    self.g.rsp('Z1,412aa7b4,4')
+                    if 0x412aa7b4 not in self.points:
+                        self.points[0x412aa7b4]='primary_source_boundary_notify_after_wait'
+                        self.g.rsp('Z1,412aa7b4,4')
+                    if self.g.data.get('mode_burst_min_frames') and self.capture_phase=='capture':
+                        count=self.g.data.get('capture_source_boundary_waits',0)+1
+                        self.g.data['capture_source_boundary_waits']=count
+                        row['boundary_wait_number']=count
+                        if 0x412aab68 not in self.points:
+                            self.points[0x412aab68]='primary_source_boundary_wait_return'
+                            self.g.rsp('Z1,412aab68,4')
+                elif (row['name']=='primary_source_boundary_wait_return' and
+                      self.g.data.get('mode_burst_min_frames') and self.capture_phase=='capture' and
+                      self.g.data.get('capture_source_boundary_waits',0)<64 and
+                      0x412aab64 not in self.points):
+                    self.points[0x412aab64]='primary_source_boundary_wait'
+                    self.g.rsp('Z1,412aab64,4')
+                if self.g.data.get('mode_burst_min_frames'):
+                    row['virtual_ns']=json.loads(self.g.qmp.command('qom-get',path='/machine',property='runtime-clock-state'))['virtual_ns']
+                    row['input_owner_states']={k:json.loads(self.g.qmp.command('qom-get',path='/machine',property=k))
+                        for k in ('primary-d980-state','primary-d980-single-frame-state',
+                                  'primary-d980-prepared-start-state','primary-reset-state',
+                                  'engine153-deferred-input-state','engine151-capture-wait-state')}
                 row['device_states']={k:json.loads(self.g.qmp.command('qom-get',path='/machine',property=k))
                     for k in ('event1508-channel-state','event1508-group-state','engine150c-state',
                               'engine1543-control-state','engine151-control-state','engine1518-state',
@@ -1652,6 +1682,10 @@ class Observer:
         armed={pc:name for pc,name in POINTS.items() if name.startswith(names) or name in extra}
         if phase=='capture' and self.g.data.get('probe_arguments',{}).get('capture_raw_pipeline'):
             armed[0x40e0db90]='capture151_isr_after_w1c'
+            if self.g.data.get('mode_burst_min_frames'):
+                self.g.data['capture_source_boundary_waits']=0
+                armed[0x412aab64]='primary_source_boundary_wait'
+                armed[0x412aab68]='primary_source_boundary_wait_return'
         added={}
         for pc,name in armed.items():
             if pc not in self.points:

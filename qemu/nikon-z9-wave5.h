@@ -16,7 +16,9 @@
 typedef struct WlWave5Instance {
     bool created, configured, buffers, result, sequence_result, ring;
     unsigned width, height, depth, fps_n, fps_d;
+    unsigned keyframe_period;
     unsigned source_index, bytes, nal_type, output_bus;
+    unsigned main_surface;
     unsigned codec_mode;
     unsigned crop[4]; /* left, top, right, bottom: coded-surface pixels */
     int recon_index;
@@ -27,6 +29,7 @@ typedef struct WlWave5Instance {
     uint64_t work_physical;
     unsigned work_bus, work_capacity;
     bool report_requested;
+    uint32_t header_lengths[4]; /* AUD, VPS (HEVC only), SPS, PPS; no prefix */
     WlHevcCodec *codec;
 } WlWave5Instance;
 
@@ -35,6 +38,7 @@ typedef struct WlWave5Job {
     WlWave5Instance *instance;
     uint8_t *input;
     unsigned strides[3], source_index, nal_type;
+    unsigned main_surface;
     uint64_t output, pts;
     unsigned capacity, input_bytes, output_bus;
     uint32_t input_crc;
@@ -49,10 +53,12 @@ typedef struct WlWave5State {
     unsigned last_command, instances, fio_address;
     uint32_t fio_data, fio_words[18];
     uint64_t writes, reads, commands, completions, rejections, resets;
+    uint32_t external_reset_held;
+    uint64_t external_resets;
     uint64_t boot_bytes, input_bytes, output_bytes;
     uint64_t boot_physical;
     uint32_t boot_crc, input_crc, output_crc;
-    const char *boot_rejection;
+    const char *boot_rejection, *source_rejection;
     WlWave5Instance instance[WL_W5_INSTANCES];
     WlWave5Job *job;
     QemuMutex lock;
@@ -179,11 +185,13 @@ static uint32_t wave5_virtual_tick(void)
 static bool wave5_report(WlWave5State *w,WlWave5Instance *i)
 {
     if (!i->report_requested) { return true; }
-    /* Original ZR reads RET1a8+100 after header/query completion. Use the
-     * instance's actual guest-owned CREATE work reservation. Header-only
-     * work has no source/image statistics; the virtual report is initialized
-     * storage, not measured Nikon weighted-prediction or ISP arithmetic. */
+    /* Original ZR40e3c810 reads RET1a8+100 into the four header lengths;
+     * 402ff918 adds a four-byte prefix to each before copying AUD/VPS/SPS/PPS.
+     * Zero-filled header reports formerly produced four-byte empty NALs.
+     * Report actual output lengths in the guest-owned CREATE reservation.
+     * Picture statistics remain unmodeled, not original ISP arithmetic. */
     uint8_t report[16]={0};
+    for (unsigned n = 0; n < 4; n++) { stl_le_p(report + 4 * n, i->header_lengths[n]); }
     return i->work_capacity>=0x110 &&
         address_space_write(&address_space_memory,i->work_physical+0x100,
             MEMTXATTRS_UNSPECIFIED,report,sizeof(report))==MEMTX_OK;
@@ -217,6 +225,7 @@ static void wave5_tick(void *opaque)
     if (success) {
         i->bytes=job->encoded->len;i->output=job->output;i->nal_type=job->nal_type;
         i->source_index=job->source_index;i->output_bus=job->output_bus;i->result=true;i->pictures++;
+        i->main_surface=job->main_surface;
         i->recon_index=(i->pictures-1)%2;i->complete_tick=wave5_virtual_tick();
         if (i->ring) { i->ring_written+=i->bytes; }
         w->input_bytes+=job->input_bytes;w->output_bytes+=i->bytes;w->input_crc=job->input_crc;
@@ -229,16 +238,18 @@ static void wave5_tick(void *opaque)
         w->regs[WL_W5_REG(0x108)]=0;w->regs[WL_W5_REG(0x10c)]=0x100;
         w->regs[WL_W5_REG(0x70)]=0;w->busy=false;w->board->wave5_busy=false;
         w->rejections++;
+        video_main_release(w->board,job->main_surface);
     }
     g_free(job->input);g_byte_array_unref(job->encoded);g_free(job);w->job=NULL;
 }
 
 static bool wave5_snapshot(WlWave5State *w,WlWave5Instance *i,WlWave5Job *job)
 {
+    w->source_rejection="unsupported source format";
     uint32_t format=w->regs[WL_W5_REG(0x158)];
     unsigned packing=(format>>3)&3,justified=(format>>5)&1,layout=format&7;
     unsigned endian=(format>>6)&15;
-    if (format&~0x3ffU || packing==3 || layout>3 || (endian!=0 && endian!=15) ||
+    if (format&~0x3ffU || packing==3 || layout>3 || (endian!=0 && endian!=15 && endian!=12) ||
         (i->depth==10 && packing==0) || (i->depth==8 && packing!=0)) { return false; }
     unsigned sy=w->regs[WL_W5_REG(0x154)]>>16,sc=w->regs[WL_W5_REG(0x154)]&0xffff;
     unsigned bpp=i->depth>8 ? 2 : 1;
@@ -247,34 +258,62 @@ static bool wave5_snapshot(WlWave5State *w,WlWave5Instance *i,WlWave5Job *job)
     unsigned rows[3]={i->height,i->height/2,i->height/2};
     unsigned samples[3]={i->width,interleaved ? i->width : i->width/2,i->width/2};
     unsigned strides[3]={sy,sc,sc};
+    unsigned main_token=0;
+    w->source_rejection="registered source pair is unavailable or changed";
+    int main_mapping=video_main_resolve(w->board,w->regs[WL_W5_REG(0x148)],
+        w->regs[WL_W5_REG(0x14c)],i->width,i->height,
+        i->width-i->crop[0]-i->crop[2],i->height-i->crop[1]-i->crop[3],
+        sy,sc,format,addresses,&main_token);
+    if (main_mapping<0) { return false; }
+    /* The registered hardware reader changes byte lanes; the actual stored
+     * packet retains the producer's format. Direct RAM uses command endian. */
+    if (main_mapping) {
+        endian=(w->board->video_main->surface[main_token-1].source_format>>6)&15;
+    }
+    w->source_rejection="source stride, DMA span or output/work overlap";
     for (unsigned p=0;p<(interleaved ? 2 : 3);p++) {
         unsigned minrow=packing==2 ? (samples[p]+2)/3*4 : samples[p]*bpp;
         sizes[p]=(uint64_t)strides[p]*rows[p];
-        if (strides[p]<minrow || strides[p]>32768 ||
-            !wave5_address(w->board,w->regs[WL_W5_REG(0x148+p*4)],sizes[p],&addresses[p]) ||
-            graphics_spans_overlap(addresses[p],sizes[p],i->work_physical,i->work_capacity) ||
-            graphics_spans_overlap(addresses[p],sizes[p],job->output,job->capacity)) { return false; }
+        uint64_t physical_size=main_mapping?video_main_physical_bytes(w->board,main_token,p):sizes[p];
+        if (strides[p]<minrow || strides[p]>32768 || (endian==12 && (strides[p]&3)) ||
+            (!main_mapping && !wave5_address(w->board,w->regs[WL_W5_REG(0x148+p*4)],sizes[p],&addresses[p])) ||
+            !dma_ram_range(w->board,addresses[p],physical_size) ||
+            graphics_spans_overlap(addresses[p],physical_size,i->work_physical,i->work_capacity) ||
+            graphics_spans_overlap(addresses[p],physical_size,job->output,job->capacity)) { return false; }
         for (unsigned q=0;q<p;q++) {
-            if (graphics_spans_overlap(addresses[p],sizes[p],addresses[q],sizes[q])) { return false; }
+            uint64_t other_size=main_mapping?video_main_physical_bytes(w->board,main_token,q):sizes[q];
+            if (graphics_spans_overlap(addresses[p],physical_size,addresses[q],other_size)) {
+                w->source_rejection="source planes overlap";return false;
+            }
         }
     }
     uint64_t total=(uint64_t)i->width*i->height*bpp*3/2;
-    if (total>128*MiB) { return false; }
+    if (total>128*MiB) { w->source_rejection="source exceeds copy bound";return false; }
     job->input=g_malloc(total);job->input_bytes=total;
     job->strides[0]=i->width*bpp;job->strides[1]=job->strides[2]=i->width/2*bpp;
     uint64_t offsets[3]={0,(uint64_t)i->width*i->height*bpp,(uint64_t)i->width*i->height*bpp*5/4};
     for (unsigned p=0;p<(interleaved ? 2 : 3);p++) {
         g_autofree uint8_t *row=g_malloc(strides[p]);
+        g_autofree uint8_t *decoded=NULL;
+        w->source_rejection="compact source header, generation or payload integrity";
+        if (main_mapping && !video_main_read(w->board,main_token,p,&decoded)) { return false; }
+        w->source_rejection="source RAM read failed";
         for (unsigned y=0;y<rows[p];y++) {
-            if (address_space_read(&address_space_memory,addresses[p]+(uint64_t)y*strides[p],
+            if (decoded) { memcpy(row,decoded+(uint64_t)y*strides[p],strides[p]); }
+            else if (address_space_read(&address_space_memory,addresses[p]+(uint64_t)y*strides[p],
                                   MEMTXATTRS_UNSPECIFIED,row,strides[p])!=MEMTX_OK) { return false; }
             for (unsigned x=0;x<samples[p];x++) {
                 unsigned value;
-                if (!packing) { value=row[x]; }
+                /* Native SRC_FORMAT332 inverts VDI32-bit-big code3 to12.
+                 * Reverse byte lanes within each 32-bit storage word before
+                 * sample unpacking. Complete rows and padding remain intact;
+                 * another endian/layout still requires its own contract. */
+                if (!packing) { value=row[endian==12 ? (x^3u) : x]; }
                 else if (packing==1) {
-                    value=lduw_le_p(row+x*2);value=justified ? value>>6 : value&1023;
+                    value=endian==12 ? lduw_be_p(row+((x*2)^2u)) : lduw_le_p(row+x*2);
+                    value=justified ? value>>6 : value&1023;
                 } else {
-                    uint32_t word=ldl_le_p(row+(x/3)*4);
+                    uint32_t word=endian==12 ? ldl_be_p(row+(x/3)*4) : ldl_le_p(row+(x/3)*4);
                     unsigned shift=justified ? 22-(x%3)*10 : (x%3)*10;
                     value=(word>>shift)&1023;
                 }
@@ -286,6 +325,8 @@ static bool wave5_snapshot(WlWave5State *w,WlWave5Instance *i,WlWave5Job *job)
         }
     }
     job->input_crc=crc32(0,job->input,total);
+    video_main_acquire(w->board,main_token);job->main_surface=main_token;
+    w->source_rejection=NULL;
     return true;
 }
 
@@ -293,6 +334,7 @@ static bool wave5_command(WlWave5State *w,unsigned command,bool core_start)
 {
     uint32_t *r=w->regs;
     unsigned info=r[WL_W5_REG(0x110)],idx=info&0xffff;
+    if (w->external_reset_held) { return false; }
     if (w->busy || (w->sleeping && command!=2)) { return false; }
     if (wave5_bus_stopped(w) && command!=4) { return false; }
     bool global=command==1 || command==2 || command==4 ||
@@ -377,6 +419,14 @@ static bool wave5_command(WlWave5State *w,unsigned command,bool core_start)
                 crop[1]+crop[3]>=height ||
                 (i->codec_mode!=3 && (r[WL_W5_REG(0x138)] || r[WL_W5_REG(0x134)]))) { return false; }
             memcpy(i->crop,crop,sizeof(crop));
+            /* Public Wave5 INTRA_PARAM field layout. Native MOV indexing
+             * follows the configured intra period; a host default250 GOP
+             * cannot substitute for a requested15-frame GOP. */
+            unsigned intra=r[WL_W5_REG(0x130)];
+            i->keyframe_period=i->codec_mode==3 ? ((intra>>17)&0x7ff) : intra>>16;
+            if (i->codec_mode==3 && !i->keyframe_period) {
+                i->keyframe_period=(intra>>6)&0x7ff;
+            }
             i->width=width;i->height=height;i->depth=depth;i->fps_n=n;i->fps_d=d;i->configured=true;
             i->sequence_result=true;r[WL_W5_REG(0x1e0)]=1;
             wave5_complete(w,1U<<9);
@@ -400,7 +450,7 @@ static bool wave5_command(WlWave5State *w,unsigned command,bool core_start)
             !wave5_address(w->board,output_bus,capacity,&output) ||
             graphics_spans_overlap(output,capacity,i->work_physical,i->work_capacity)) { return false; }
         if (!i->codec) {
-            i->codec=wl_video_open(i->codec_mode,i->width,i->height,i->depth,i->fps_n,i->fps_d,w->lossless,i->crop);
+            i->codec=wl_video_open(i->codec_mode,i->width,i->height,i->depth,i->fps_n,i->fps_d,w->lossless,i->crop,i->keyframe_period);
             if (!i->codec) { return false; }
         }
         unsigned option=r[WL_W5_REG(0x164)],source=r[WL_W5_REG(0x144)];
@@ -409,10 +459,11 @@ static bool wave5_command(WlWave5State *w,unsigned command,bool core_start)
         bool headers=!(option&3);
         i->submit_tick=wave5_virtual_tick();
         i->report_requested=(r[WL_W5_REG(0x128)]&4)!=0;
+        memset(i->header_lengths, 0, sizeof(i->header_lengths));
         if (headers || source==UINT32_MAX) {
             GByteArray *payload=g_byte_array_new();
             bool ok=true;
-            if (headers) { ok=wl_hevc_headers(i->codec,payload); }
+            if (headers) { ok=wl_hevc_headers(i->codec,payload,option,i->header_lengths); }
             else {
                 static const uint8_t hevc_eos[]={0,0,0,1,0x48,1,0x80};
                 static const uint8_t avc_eos[]={0,0,0,1,0x0a,0x80};
@@ -470,7 +521,11 @@ static bool wave5_command(WlWave5State *w,unsigned command,bool core_start)
             r[WL_W5_REG(0x114)]=i->output_bus;
             r[WL_W5_REG(0x118)]=i->output_bus+i->bytes;
             r[WL_W5_REG(0x11c)]=2;r[WL_W5_REG(0x120)]=2;
-            r[WL_W5_REG(0x124)]=i->pictures>1 ? 1 : 0;
+            /* Key pictures can recur after the first frame. Report the
+             * actual encoded access unit, not the lifetime frame count. */
+            r[WL_W5_REG(0x124)]=i->codec_mode==3 ?
+                (i->nal_type==5 ? 0 : 1) :
+                (i->nal_type>=16 && i->nal_type<=23 ? 0 : 1);
             r[WL_W5_REG(0x128)]=i->pictures ? i->pictures-1 : 0;
             /* Native40e59c1c explicitly recognizes HEADER_ONLY=-3. A
              * header has no reconstructed picture or consumed source. */
@@ -492,6 +547,7 @@ static bool wave5_command(WlWave5State *w,unsigned command,bool core_start)
             r[WL_W5_REG(0x1c4)]=r[WL_W5_REG(0x1c8)]=i->submit_tick;
             r[WL_W5_REG(0x1cc)]=i->submit_tick;r[WL_W5_REG(0x1d0)]=i->complete_tick;
             r[WL_W5_REG(0x15c)]=i->nal_type;r[WL_W5_REG(0x1e0)]=0;
+            video_main_release(w->board,i->main_surface);i->main_surface=0;
             i->result=false;
         } else if (query==6) { r[WL_W5_REG(0x114)]=i->ring ? i->ring_bus+i->ring_written : i->output_bus+i->bytes; }
         else if (query==7) { r[WL_W5_REG(0x114)]=0; }
@@ -507,6 +563,36 @@ static bool wave5_command(WlWave5State *w,unsigned command,bool core_start)
         w->sleeping=true;wave5_complete(w,0);
     } else { return false; }
     w->commands++;w->last_command=command;return true;
+}
+
+/* The native movie power sequence asserts all seven bank8 bits16..22
+ * after destroying its codec, and releases them before the next INIT.
+ * Previously these writes only changed the bootstrap latch: CUR_PC stayed
+ * nonzero and the original VDI returned CALLED_BEFORE on a fresh session.
+ * Model the observed complete reset bundle, not an invented mapping of an
+ * individual bit to a physical subcore. Active DMA/results remain protected.
+ */
+static bool wave5_external_reset(NikonZ9State *s,hwaddr address,uint32_t value)
+{
+    const uint32_t bundle=0x007f0000;
+    WlWave5State *w=s->wave5;
+    if (!s->wave5_model || !(value&bundle)) { return true; }
+    bool release=address==0x0d154248;
+    if (!release && (w->busy || w->job || w->pending || w->instances)) {
+        w->rejections++;return false;
+    }
+    uint32_t held=release ? w->external_reset_held&~value :
+                           w->external_reset_held|(value&bundle);
+    if (held==bundle && w->external_reset_held!=bundle) {
+        memset(w->regs,0,sizeof(w->regs));
+        memset(w->fio_words,0,sizeof(w->fio_words));
+        w->fio_address=0;w->fio_data=0;
+        w->booted=false;w->sleeping=false;w->interrupt_mask=0;
+        w->boot_physical=0;w->boot_bytes=0;w->boot_crc=0;
+        w->external_resets++;wave5_irq_update(w);
+    }
+    w->external_reset_held=held;
+    return true;
 }
 
 static bool wave5_access(NikonZ9State *s,hwaddr address,uint64_t *value,unsigned size,bool write)
@@ -591,7 +677,9 @@ static char *get_wave5_state(Object *obj,Error **errp)
     NikonZ9State *s=NIKON_Z9_LAB(obj);WlWave5State *w=s->wave5;
     if (!w) { return g_strdup("{\"enabled\":false}"); }
     GString *j=g_string_new(NULL);
-    g_string_append_printf(j,"{\"enabled\":%s,\"virtual_product\":%u,\"booted\":%s,\"busy\":%s,\"pending\":%u,"
+    g_string_append_printf(j,"{\"external_reset_held\":%u,\"external_resets\":%" PRIu64 ",",
+        w->external_reset_held,w->external_resets);
+    g_string_append_printf(j,"\"enabled\":%s,\"virtual_product\":%u,\"booted\":%s,\"busy\":%s,\"pending\":%u,"
         "\"writes\":%" PRIu64 ",\"reads\":%" PRIu64 ",\"commands\":%" PRIu64 ",\"completions\":%" PRIu64 ","
         "\"rejects\":%" PRIu64 ",\"boot_bytes\":%" PRIu64 ",\"boot_crc\":%u,\"input_bytes\":%" PRIu64 ","
         "\"output_bytes\":%" PRIu64 ",\"input_crc\":%u,\"output_crc\":%u,"
@@ -603,11 +691,11 @@ static char *get_wave5_state(Object *obj,Error **errp)
         WlWave5Instance *i=&w->instance[n];
         g_string_append_printf(j,"%s{\"created\":%s,\"configured\":%s,\"width\":%u,\"height\":%u,\"depth\":%u,\"pictures\":%" PRIu64 ",\"result\":%s,\"bytes\":%u,"
             "\"ring\":%s,\"ring_bus\":%u,\"ring_capacity\":%u,\"ring_written\":%u,"
-            "\"codec_mode\":%u,\"display_width\":%u,\"display_height\":%u,\"crop\":[%u,%u,%u,%u],\"fps_n\":%u,\"fps_d\":%u}",
+            "\"codec_mode\":%u,\"display_width\":%u,\"display_height\":%u,\"crop\":[%u,%u,%u,%u],\"fps_n\":%u,\"fps_d\":%u,\"keyframe_period\":%u}",
             n ? "," : "",i->created ? "true" : "false",i->configured ? "true" : "false",i->width,i->height,i->depth,i->pictures,i->result ? "true" : "false",i->bytes,
             i->ring ? "true" : "false",i->ring_bus,i->ring_capacity,i->ring_written,
             i->codec_mode,i->width-i->crop[0]-i->crop[2],i->height-i->crop[1]-i->crop[3],
-            i->crop[0],i->crop[1],i->crop[2],i->crop[3],i->fps_n,i->fps_d);
+            i->crop[0],i->crop[1],i->crop[2],i->crop[3],i->fps_n,i->fps_d,i->keyframe_period);
     }
     g_string_append(j,"],\"fio_configuration\":{");
     for (unsigned n=0;n<G_N_ELEMENTS(wave5_fio_offsets);n++) {
@@ -617,10 +705,10 @@ static char *get_wave5_state(Object *obj,Error **errp)
     for (unsigned n=0x100;n<0x200;n+=4) {
         g_string_append_printf(j,"%s\"0x%x\":%u",n==0x100 ? "" : ",",n,w->regs[n/4]);
     }
-    g_string_append_printf(j,"},\"boot_rejection\":\"%s\",\"original_execution_required\":%s,\"diagnostic_host_codec\":%s,\"boot_physical\":%" PRIu64 ","
+    g_string_append_printf(j,"},\"source_rejection\":\"%s\",\"boot_rejection\":\"%s\",\"original_execution_required\":%s,\"diagnostic_host_codec\":%s,\"boot_physical\":%" PRIu64 ","
         "\"physical_identity_verified\":false,\"vendor_microcode_executed\":false,"
         "\"scope\":\"virtual VDI control; original code DMA evidence; explicitly optional diagnostic host codec\"}",
-        w->boot_rejection ? w->boot_rejection : "",s->wave5_host_codec_diagnostic ? "false" : "true",
+        w->source_rejection ? w->source_rejection : "",w->boot_rejection ? w->boot_rejection : "",s->wave5_host_codec_diagnostic ? "false" : "true",
         s->wave5_host_codec_diagnostic ? "true" : "false",w->boot_physical);
     return g_string_free(j,false);
 }

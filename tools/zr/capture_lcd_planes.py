@@ -30,8 +30,8 @@ def capture(g, label, scanout):
                 ('color',scanout['color'],w*h*2)]:
             target=g.out/(label+'-'+kind+'.bin')
             if target.exists():raise ValueError('Preserve previous LCD evidence')
-            reply=g.qmp.hmp(f'pmemsave {addr:#x} {amount:#x} "{target}"')
-            if reply or target.stat().st_size!=amount:raise RuntimeError('LCD plane capture failed: '+reply)
+            from host_capture_file import memory
+            memory(g,addr,amount,target)
             captured[kind]=dict(file=target.name,sha256=sha(target),address=addr,bytes=amount)
     finally:
         g.qmp.sock.settimeout(previous_timeout)

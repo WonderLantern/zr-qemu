@@ -11,21 +11,25 @@ import math
 from pathlib import Path
 import struct
 from inspect_virtual_exfat import catalog
+from virtual_exfat_window import window
 
 
-def extract(volume, name, output):
+def extract(volume, name, output, *, max_bytes=256*1024*1024):
     volume, output = Path(volume), Path(output)
+    origin,volume_bytes=window(volume)
     rows = [x for x in catalog(volume)['files'] if x['path'] == name and not x['directory']]
     if len(rows) != 1:
         raise ValueError('One exact, validated file entry required')
     row = rows[0]
     length = row['bytes']
-    if not 0 < length <= 256*1024*1024 or row['valid_bytes'] != length:
+    if (not isinstance(max_bytes,int) or max_bytes<=0 or
+            not 0 < length <= min(max_bytes,volume.stat().st_size) or row['valid_bytes'] != length):
         raise ValueError('Bounded, fully initialized file required')
     if output.exists() or not output.parent.is_dir():
         raise ValueError('Fresh output in an existing private directory required')
     digest = hashlib.sha256()
     with volume.open('rb') as src, output.open('xb') as dst:
+        src.seek(origin)
         boot = src.read(512)
         sector = 1 << boot[108]
         cluster = sector << boot[109]
@@ -39,9 +43,9 @@ def extract(volume, name, output):
             seen.add(current)
             offset = heap*sector+(current-2)*cluster
             size = min(left, cluster)
-            if offset+size > volume.stat().st_size:
+            if offset+size > volume_bytes:
                 raise ValueError('Actual file span exceeds the volume')
-            src.seek(offset)
+            src.seek(origin+offset)
             data = src.read(size)
             if len(data) != size:
                 raise ValueError('Short actual file read')
@@ -52,7 +56,7 @@ def extract(volume, name, output):
                 if row['contiguous']:
                     current += 1
                 else:
-                    src.seek(fat*sector+current*4)
+                    src.seek(origin+fat*sector+current*4)
                     value = src.read(4)
                     if len(value) != 4:
                         raise ValueError('Short FAT read')

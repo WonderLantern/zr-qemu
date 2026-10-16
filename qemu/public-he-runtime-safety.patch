@@ -1,0 +1,192 @@
+--- a/nikon_he_predecessor.h
++++ b/nikon_he_predecessor.h
+@@ -48,6 +48,9 @@
+ class PrecinctPredecessorState {
+ public:
+     PrecinctPredecessorState() = default;
++    ~PrecinctPredecessorState() { destroy(); }
++    PrecinctPredecessorState(const PrecinctPredecessorState&) = delete;
++    PrecinctPredecessorState& operator=(const PrecinctPredecessorState&) = delete;
+ 
+     // Initialize storage based on sub-band layout.
+     // Must be called once before any other methods.
+--- a/nikon_he_decode.cpp
++++ b/nikon_he_decode.cpp
+@@ -94,16 +94,24 @@
+         // The full precinct occupies sz + 12 bytes; bound-check.
+         if (sz + 12 > remaining) break;
+         prec_ptrs[p] = cursor;
+-        prec_sizes[p] = sz;
++        prec_sizes[p] = sz + 12;
+         cursor += sz + 12;
+         remaining -= sz + 12;
+         n_walked++;
+ 
+         // 6-byte alignment pad after every 16th file precinct (index 15,31,...)
+-        if ((p & 0xF) == 15 && remaining >= 6) {
++        if ((p & 0xF) == 15 && n_walked < (image_height + 3) / 4 && remaining >= 6) {
+             cursor += 6;
+             remaining -= 6;
+         }
++    }
++
++    // A partial walk must never turn into a successfully decoded image.
++    if (n_walked != (image_height + 3) / 4 || remaining != 2 ||
++        cursor[0] != 0xff || cursor[1] != 0x11) {
++        delete[] prec_ptrs;
++        delete[] prec_sizes;
++        return result;
+     }
+ 
+     // 5. Allocate image-wide tile_coeff_buf and carry buffers.
+--- a/nikon_he_tile.cpp
++++ b/nikon_he_tile.cpp
+@@ -154,7 +154,7 @@
+         PrecinctDecodeResult prec = decode_precinct(
+             precinct_data[p], precinct_sizes[p], image_width,
+             config, pred_state, predict_lut, bufA.data(), bufB.data());
+-        if (!prec.success) break;
++        if (!prec.success) return result;
+         result.precincts_decoded++;
+ 
+         // 2. Pass A h1_l12 → h_out (LB-ordered layout).
+@@ -221,7 +221,7 @@
+                 tile_buf.data() + kStripesPerTile * stripe_ints,
+                 static_cast<size_t>(2 * stripe_ints) * sizeof(int32_t));
+ 
+-    result.success = true;
++    result.success = result.precincts_decoded == precinct_count;
+     return result;
+ }
+ 
+--- a/nikon_he_bit_reader.h
++++ b/nikon_he_bit_reader.h
+@@ -61,6 +61,7 @@
+ 
+     // True when all source bytes have been consumed. The register may
+     // still contain zero-padded bits from a partial final word.
++    bool underflow() const { return underflow_; }
+     bool exhausted() const { return cursor_ >= end_; }
+ 
+ private:
+@@ -69,6 +70,7 @@
+     const uint8_t* base_ = nullptr;
+     const uint8_t* cursor_ = nullptr;
+     const uint8_t* end_ = nullptr;
++    bool underflow_ = false;
+     uint64_t register_ = 0;
+     int bits_available_ = 0;
+ };
+--- a/nikon_he_bit_reader.cpp
++++ b/nikon_he_bit_reader.cpp
+@@ -28,6 +28,7 @@
+ namespace nikon_he {
+ 
+ void BitReader::reset(const uint8_t* data, size_t length) {
++    underflow_ = false;
+     base_ = data;
+     cursor_ = data;
+     end_ = data + length;
+@@ -68,7 +69,8 @@
+ uint32_t BitReader::read_bits(int count) {
+     while (bits_available_ < count) {
+         if (cursor_ >= end_) {
+-            // Source exhausted: return whatever bits remain, zero-padded.
++            underflow_ = true;
++            // Retain deterministic bits, but report the failed read.
+             uint32_t result = static_cast<uint32_t>(register_ >> (64 - count));
+             register_ = 0;
+             bits_available_ = 0;
+@@ -87,6 +89,7 @@
+     for (;;) {
+         if (bits_available_ <= 0) {
+             if (cursor_ >= end_) {
++                underflow_ = true;
+                 return count;  // unterminated run at EOF
+             }
+             refill();
+--- a/nikon_he_precinct_decode.cpp
++++ b/nikon_he_precinct_decode.cpp
+@@ -176,6 +176,12 @@
+                                ng, gtli, predict_lut,
+                                prev_gcli, gcli_out);
+ 
++            for (int i=0; i<ng; i++) {
++                if (gcli_out[i]>15 || gcli_reader.underflow() || sig_reader.underflow()) {
++                    delete[] gcli_out;
++                    return result;
++                }
++            }
+             // 4. Unpack coef magnitudes.
+             int coeff_count = ng * 4;
+             int32_t* coeffs = new int32_t[coeff_count];
+@@ -206,6 +212,7 @@
+             delete[] gcli_out;
+             delete[] coeffs;
+ 
++            if (data_reader.underflow() || sign_reader.underflow()) return result;
+             result.total_sub_bands_decoded++;
+         }
+ 
+--- a/nikon_he_idwt_vertical.cpp
++++ b/nikon_he_idwt_vertical.cpp
+@@ -27,8 +27,8 @@
+ //   In  | x0   | Loop body                                              | Out
+ //   ----|------|--------------------------------------------------------|----
+ //    0  | new  | x2[i] = x0[i]                                          | 1
+-//    1  | new  | x2[i] = (x0[i] << 2) - x2[i]                           | 4
+-//    2  | new  | x2[i] = x0[i] << 2                                     | 5
++//    1  | new  | x2[i] = (x0[i] * 4) - x2[i]                           | 4
++//    2  | new  | x2[i] = x0[i] * 4                                     | 5
+ //    4  | new  | w = x2[i] - x0[i]; x3[i] = (w+1)>>2; x2[i] = x0[i]     | 7
+ //    5  | new  | w = x2[i] - 2*x0[i]; x3[i] = (w+1)>>2; x2[i] = x0[i]   | 7
+ //    7  | new  | tmp = x3[i]; x1[i] = tmp;
+@@ -67,7 +67,7 @@
+ 
+     case VerLiftState::kInit1:                  // path B step 2
+         for (int i = 0; i < n; ++i) {
+-            x2[i] = (x0[i] << 2) - x2[i];
++            x2[i] = (x0[i] * 4) - x2[i];
+         }
+         st.state = VerLiftState::kInit4;
+         break;
+@@ -83,7 +83,7 @@
+ 
+     case VerLiftState::kInit2:                  // path A entry (tile 0)
+         for (int i = 0; i < n; ++i) {
+-            x2[i] = x0[i] << 2;
++            x2[i] = x0[i] * 4;
+         }
+         st.state = VerLiftState::kState5;
+         break;
+@@ -109,7 +109,7 @@
+                 int32_t tmp = x3[i];
+                 x1_out[i] = tmp;
+                 x3[i] = tmp + 2 * x2[i];
+-                x2[i] = (x0[i] << 2) - x2[i];
++                x2[i] = (x0[i] * 4) - x2[i];
+             }
+             st.state = VerLiftState::kState8;
+         }
+--- a/nikon_he_bayer.cpp
++++ b/nikon_he_bayer.cpp
+@@ -65,7 +65,7 @@
+             out_L[r * stride_out + c] = lh_predicted
+                 - ((ll_hl_sum + p1_row[cp] + p4_prev[c]) >> 3);
+ 
+-            int32_t pred_2x = (lh_predicted + lh_next_predicted) << 1;
++            int32_t pred_2x = (lh_predicted + lh_next_predicted) * 2;
+             int32_t hh_predicted = p3_row[c]
+                 - ((ll_hl_sum + p4_row[c] + p1_next[c]) >> 3);
+             out_H[r * stride_out + c] = hh_predicted + (pred_2x >> 2);
+--- a/nikon_he_predict_lut.h
++++ b/nikon_he_predict_lut.h
+@@ -52,6 +52,8 @@
+                                   int gtli,
+                                   int previous_gcli,
+                                   int unary_code) {
++    if(gtli<0 || gtli>15 || previous_gcli<0 || previous_gcli>15 ||
++       unary_code<0 || unary_code>31)return kPredictionLutSentinel;
+     int index = (gtli << 9) | (previous_gcli << 5) | unary_code;
+     return lut[index];
+ }

@@ -12,6 +12,10 @@ KEYS = {
     # Original337 names body0e/word0 bit11 ID_SW0_EXP_MODE. Synthetic
     # logical mode input; does not assert a physical dedicated ZR button.
     'exp-mode': (14, 0, 0x800),
+    # Pinned original decoder/name table: body10 -> ID_SW1_RELEASE_MODE.
+    # This exposes the native release-mode UI; it does not set burst state.
+    'release-mode': (16, 1, 0x08000000),
+    'i': (72, 1, 0x400),  # Original ID_SW1_I; native menu selection checked separately.
     'left': (35, 0, 0x40), 'right': (34, 0, 0x80),
     'up': (36, 0, 0x20), 'down': (37, 0, 0x10),
     'center': (42, 0, 0x8000),
@@ -29,7 +33,9 @@ SELECTOR_FIELDS = {
 }
 SELECTORS = {f'selector{offset:02x}-{label}': (offset,value)
              for offset in SELECTOR_FIELDS for label,value in (('off',0),('on',1),('two',2))}
-MAX_KEYS = 64
+# Full native audio-menu navigation plus two recording/recovery cycles.
+# This is a host recipe bound; it does not change any guest input semantics.
+MAX_KEYS = 128
 
 
 def consumer_rows(data):

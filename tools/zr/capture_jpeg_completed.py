@@ -34,11 +34,14 @@ def dump_completed(g, observation, registers):
     if not count_only:
         dump('encoded', s['output'], s['last_bytes'], '.jpg')
     plane = s['stride'] * s['height']
+    chroma_divisor = s.get('input_chroma_divisor', 1)
+    if chroma_divisor not in (1, 2) or s['height'] % chroma_divisor:
+        raise ValueError('Actual owned JPEG input must have integral NV16/NV12 planes')
     # Main-frame actual output is already saved by the capture graph observer.
     # Read complete middle/small planes here; no repeated 90MB main snapshot.
     if plane <= 4*1024*1024:
         dump('y', s['y'], plane, '.bin')
-        dump('uv', s['uv'], plane, '.bin')
+        dump('uv', s['uv'], plane // chroma_divisor, '.bin')
     config = json.loads(g.qmp.command('qom-get',path='/machine',property='engine15e2-config-state'))
     pipeline = json.loads(g.qmp.command('qom-get',path='/machine',property='capture-nv16-pipeline-state'))
     result = dict(job=job, count_only=count_only, preflight=preflight, original_pc=hex(registers['PC']), observation=observation,

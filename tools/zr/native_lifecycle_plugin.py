@@ -17,12 +17,16 @@ def validate_bindings(profile):
     """Check the C observer's fixed capacities before starting a guest."""
     points, regions = profile.get('points'), profile.get('memory')
     maximum = profile.get('maximum_records',8192)
-    if type(maximum) is not int or not 64 <= maximum <= 65536:
-        raise ValueError('Lifecycle record limit requires 64..65536')
-    if not isinstance(points, dict) or not 1 <= len(points) <= 64:
-        raise ValueError('Lifecycle observer requires 1..64 instruction points')
-    if not isinstance(regions, dict) or len(regions) > 8:
-        raise ValueError('Lifecycle observer permits at most 8 memory regions')
+    if type(maximum) is not int or not 64 <= maximum <= 262144:
+        raise ValueError('Lifecycle record limit requires 64..262144')
+    if not isinstance(points, dict) or not 1 <= len(points) <= 128:
+        raise ValueError('Lifecycle observer requires 1..128 instruction points')
+    if not isinstance(regions, dict) or len(regions) > 10:
+        raise ValueError('Lifecycle observer permits at most 10 memory regions')
+    flush = profile.get('flush_points', [])
+    if (not isinstance(flush, list) or any(not isinstance(name, str) for name in flush) or
+            len(set(flush)) != len(flush) or not set(flush).issubset(points)):
+        raise ValueError('Flush points must be unique bound instruction labels')
     filters=profile.get('skip_x0',{})
     if not isinstance(filters,dict) or not set(filters).issubset(points):
         raise ValueError('Only explicitly bound points may filter X0')
@@ -50,7 +54,7 @@ def validate_bindings(profile):
 
 
 def attach(guest, profile_path):
-    if (os.name == 'nt' or os.environ.get('WSL_DISTRO_NAME') == 'ubuntu-noble'):
+    if (os.name=='nt' or os.environ.get('WSL_DISTRO_NAME')=='ubuntu-noble'):
         raise ValueError('Dedicated Nikon distribution required')
     profile_path = Path(profile_path)
     profile = json.loads(profile_path.read_text())
@@ -75,6 +79,8 @@ def attach(guest, profile_path):
     lines.append(f'L maximum_records {profile.get("maximum_records",8192):x} 0')
     for name,value in profile.get('skip_x0',{}).items():
         lines.append(f'S {name} {int(value,0):x} 0')
+    for name in profile.get('flush_points', []):
+        lines.append(f'F {name} 0 0')
     for name, region in profile['memory'].items():
         if 'register' in region:
             if 'address' in region or type(region['register']) is not int or not 0 <= region['register'] < 32:
@@ -90,4 +96,8 @@ def attach(guest, profile_path):
     guest.data['lifecycle_observer'] = dict(source_sha256=sha(source), plugin_sha256=sha(plugin),
         profile_sha256=sha(profile_path), log='lifecycle.jsonl', maximum_records=profile.get('maximum_records',8192),
         skip_x0=profile.get('skip_x0',{}),
+        flush_points=profile.get('flush_points', []),
         scope='Read-only non-stopping native callbacks and bounded work RAM; no device completion or guest edits')
+    if 'context_write_watch' in profile:
+        from native_context_write_plugin import attach as attach_write_watch
+        attach_write_watch(guest,profile,profile_path)

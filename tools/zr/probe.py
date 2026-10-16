@@ -2,6 +2,7 @@
 import hashlib
 import json
 import socket
+import time
 import os
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
@@ -18,23 +19,58 @@ class QMP:
         self.sock.connect(str(path))
         self.fp = self.sock.makefile('rwb', buffering=0)
         self.events = []
+        self.command_timing = dict(commands=0, slow=[], slow_omitted=0,
+                                   max_seconds=0, failed=None)
+        self.transport_failed = None
         self.greeting = json.loads(self.fp.readline())
         self.command('qmp_capabilities')
         self.sock.settimeout(3)
 
     def command(self, name, **args):
-        self.fp.write(json.dumps({'execute': name, 'arguments': args}).encode() + b'\n')
-        while True:
-            line = self.fp.readline()
-            if not line:
-                raise EOFError('QMP disconnected')
-            item = json.loads(line)
-            if 'event' in item:
-                self.events.append(item)
-            elif 'error' in item:
-                raise RuntimeError(item['error'])
-            elif 'return' in item:
-                return item['return']
+        if self.transport_failed is not None:
+            raise RuntimeError('QMP transport already failed: ' + self.transport_failed)
+        previous = self.sock.gettimeout()
+        # Synchronous software image/codec work can hold QEMU's main loop.
+        # Pause must finish that work; this is a host deadline, not extra guest
+        # recording time. Other commands retain the caller's bounded timeout.
+        timeout = max(previous or 3, 30) if name == 'stop' else (previous or 3)
+        begun = time.monotonic()
+        deadline = begun + timeout
+        self.command_timing['commands'] += 1
+        try:
+            self.sock.settimeout(timeout)
+            self.fp.write(json.dumps({'execute': name, 'arguments': args}).encode() + b'\n')
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('QMP command deadline expired')
+                self.sock.settimeout(remaining)
+                line = self.fp.readline()
+                if not line:
+                    raise EOFError('QMP disconnected')
+                item = json.loads(line)
+                if 'event' in item:
+                    self.events.append(item)
+                elif 'error' in item:
+                    raise RuntimeError(item['error'])
+                elif 'return' in item:
+                    return item['return']
+        except (OSError, EOFError, ValueError, KeyboardInterrupt) as error:
+            # A timed-out makefile cannot safely consume a late reply. Never
+            # retry a command or misattribute that reply to a cleanup command.
+            self.transport_failed = f'{name}: {error!r}'
+            self.command_timing['failed'] = dict(command=name, error=repr(error),
+                                                deadline_seconds=timeout)
+            raise
+        finally:
+            elapsed = time.monotonic() - begun
+            self.command_timing['max_seconds'] = max(self.command_timing['max_seconds'], elapsed)
+            if elapsed >= 3:
+                if len(self.command_timing['slow']) < 128:
+                    self.command_timing['slow'].append(dict(command=name, seconds=elapsed))
+                else:
+                    self.command_timing['slow_omitted'] += 1
+            self.sock.settimeout(previous)
 
     def hmp(self, command, cpu=0):
         return self.command('human-monitor-command', **{'command-line': command, 'cpu-index': cpu})

@@ -9,17 +9,18 @@ import json
 import math
 from pathlib import Path
 import struct
+from virtual_exfat_window import window
 
 
 def catalog(path):
     path=Path(path)
     if not path.is_file():raise ValueError('regular extracted volume file required')
-    size=path.stat().st_size;rows=[];visited=set()
+    origin,size=window(path);rows=[];visited=set()
     with path.open('rb') as stream:
         def read(offset,length):
             if offset<0 or length<0 or offset+length>size or length>16*1024*1024:
                 raise ValueError('out-of-range volume read')
-            stream.seek(offset);data=stream.read(length)
+            stream.seek(origin+offset);data=stream.read(length)
             if len(data)!=length:raise ValueError('short volume read')
             return data
         boot=read(0,512)

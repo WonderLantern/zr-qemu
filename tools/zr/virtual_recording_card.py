@@ -15,7 +15,7 @@ import re
 import struct
 import subprocess
 
-ROOT=Path(__import__('os').environ['WL_ZR_OUTPUT']).resolve().parent
+ROOT=Path(os.environ['WL_ZR_WORK']).resolve()/'runs'
 
 
 def extents(stream,length):
@@ -30,12 +30,15 @@ def extents(stream,length):
         position=end
 
 
-def create(path,filesystem='blank'):
+def create(path,filesystem='blank',size_mib=None):
     path=Path(path).resolve()
     if (os.name=='nt' or os.environ.get('WSL_DISTRO_NAME')=='ubuntu-noble'):raise ValueError('Nikon WSL only')
     if not path.is_relative_to(ROOT) or path.suffix!='.raw':raise ValueError('fresh private run image required')
     if filesystem not in ('blank','exfat'):raise ValueError('unsupported card fixture')
-    size=(128 if filesystem=='blank' else 8192)*1024*1024
+    if size_mib is None:size_mib=128 if filesystem=='blank' else 8192
+    if type(size_mib)!=int or not (128 if filesystem=='blank' else 512)<=size_mib<=65536:
+        raise ValueError('Bounded virtual card capacity required')
+    size=size_mib*1024*1024
     with path.open('xb') as stream:stream.truncate(size)
     result=dict(path=str(path),bytes=size,format='raw',filesystem=filesystem,
         initially_blank=filesystem=='blank',camera_files_supplied=False,
@@ -84,14 +87,26 @@ def create(path,filesystem='blank'):
     return result
 
 
-def audit(path):
+def audit(path,direct_volume=False):
     """After QEMU exits, extract its partition into a fresh sparse file and fsck -n.
 
     This checks filesystem integrity, not capture or codec correctness.
     """
-    path=Path(path).resolve()
+    requested=Path(path).absolute()
+    path=requested.resolve()
     if (os.name=='nt' or os.environ.get('WSL_DISTRO_NAME')=='ubuntu-noble') or not path.is_relative_to(ROOT):
         raise ValueError('private Nikon run card required')
+    if requested.is_symlink() and not direct_volume:
+        raise ValueError('Virtual card views require the no-copy direct audit')
+    if direct_volume:
+        from virtual_exfat_window import fsck_private_card
+        result=fsck_private_card(path)
+        result['resolved_source_card']=str(path)
+        result['derived_volume']=str(requested)
+        result['source_card']=str(requested)
+        result['auditor_sha256']=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        requested.with_suffix('.audit.json').open('x').write(json.dumps(result,indent=2)+'\n')
+        return result
     before=path.stat();output=path.with_name(path.stem+'-after-volume.raw')
     with path.open('rb') as source:
         mbr=source.read(512)

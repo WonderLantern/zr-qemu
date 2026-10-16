@@ -7,6 +7,29 @@ video mode, recording or a valid file, and never changes guest memory.
 from zr_key_sequence import SELECTOR_FIELDS,consumed_by_native_key
 
 
+def visible_ui_ready(path):
+    """A drawn neutral overlay must exist before enqueueing UI navigation.
+
+    This observes pixels only; it proves neither correct image transport nor
+    the menu handler's readiness. Uniform black/green scanout is insufficient.
+    """
+    from PIL import Image
+    import numpy as np
+    with Image.open(path) as image:
+        if image.size != (1280, 800):
+            return None
+        pixels = np.asarray(image.convert('RGB'))
+    edge = np.concatenate((pixels[:100].reshape(-1, 3), pixels[-100:].reshape(-1, 3)))
+    white = (edge.min(axis=1) >= 160) & (np.ptp(edge, axis=1) <= 24)
+    dark = edge.max(axis=1) <= 64
+    bright_count, dark_count = int(white.sum()), int(dark.sum())
+    if bright_count < 256 or dark_count < 256:
+        return None
+    return dict(classification='visible neutral overlay in original scanout',
+                bright_edge_pixels=bright_count, dark_edge_pixels=dark_count,
+                ui_navigation_verified=False, liveview_verified=False)
+
+
 def initial_consumer_lcd_ready(rows,body_hex,scanout):
     body=bytes.fromhex(body_hex)
     if len(body)!=124 or body[0]!=1 or body[4]!=1 or any(

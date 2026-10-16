@@ -2,3 +2,5 @@
 COPYING text eol=lf
 # Unified-diff blank context lines require a single space.
 *.patch -whitespace
+# Preserve upstream license text byte-for-byte, including its whitespace.
+qemu/nikon-he-public/LICENSE.* -whitespace

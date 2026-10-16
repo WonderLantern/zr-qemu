@@ -31,9 +31,39 @@ class ZRGuest(ContractGuest):
             self.data['unknown_transactions']=[s for s in self.log().splitlines() if 'Z9_UNKNOWN' in s]
             if self.qmp and self.proc and self.proc.poll() is None:
                 self.qmp.command('stop')
+                # A late image observation must not discard the coarse
+                # device state explaining an original command rejection.
+                for option, key, prop in (
+                        ('serial5_pcm_rates', 'serial5_pcm_final', 'serial5-pcm-state'),
+                        ('capture_transition_batch', 'engine151_capture_wait_final', 'engine151-capture-wait-state'),
+                        ('capture_transition_batch', 'engine1540_wait_final', 'engine1540-wait-state'),
+                        ('capture_raw_pipeline', 'engine1540_conversion_final', 'engine1540-conversion-state'),
+                        ('capture_raw_pipeline', 'engine1540_reencode_final', 'engine1540-reencode-state'),
+                        ('primary_reset_queued_start', 'primary_reset_queued_start_final', 'primary-reset-queued-start-state'),
+                        ('wave5_vpu', 'wave5_vpu_final', 'wave5-vpu-state'),
+                        ('programmed_channel_clock', 'programmed_channel_clock_final', 'event1508-programmed-clock-state'),
+                        ('video_source_ram', 'video_source_ram_final', 'video-source-ram-state'),
+                        ('video_main_output', 'video_main_output_final', 'video-main-output-state'),
+                        ('video_preview_ram', 'video_preview_ram_final', 'video-preview-ram-state'),
+                        ('video_raw_transport', 'video_raw_transport_final', 'video-raw-transport-state'),
+                        ('video_raw_packet_ring', 'video_raw_packet_ring_final', 'video-raw-packet-ring-state')):
+                    if self.data.get('probe_arguments',{}).get(option):
+                        try:
+                            self.data[key] = json.loads(self.qmp.command('qom-get',path='/machine',property=prop))
+                        except Exception as diagnostic_error:
+                            self.data.setdefault('early_device_snapshot_errors',{})[key] = repr(diagnostic_error)
+                if self.data.get('probe_arguments',{}).get('capture_video_source_ram'):
+                    from capture_video_source_ram import capture as capture_source_ram
+                    capture_source_ram(self, 999, 'terminal')
+                if self.data.get('engine1540_conversion_final'):
+                    try:
+                        from capture_raw_conversion import capture as capture_conversion
+                        capture_conversion(self)
+                    except Exception as diagnostic_error:
+                        self.data['raw_conversion_snapshot_error'] = repr(diagnostic_error)
                 if self.data.get('probe_arguments',{}).get('capture_transition_batch'):
                     for prop in ('primary-preview-reset-state','engine153-alternate-bank-state',
-                                 'capture-stream-rearm-state','engine1540-alternate-bank-state',
+                                 'capture-stream-rearm-state','capture-frame-pool-state','engine153-deferred-input-state','engine1540-alternate-bank-state',
                                  'engine15e2-alternate-bank-state'):
                         self.data[prop.replace('-state','').replace('-','_')+'_final']=json.loads(
                             self.qmp.command('qom-get',path='/machine',property=prop))
@@ -87,6 +117,15 @@ class ZRGuest(ContractGuest):
                 if self.data.get('probe_arguments',{}).get('video_raw_transport'):
                     self.data['video_raw_transport_final']=json.loads(self.qmp.command(
                         'qom-get',path='/machine',property='video-raw-transport-state'))
+                if self.data.get('probe_arguments',{}).get('video_primary_boundaries'):
+                    self.data['video_primary_boundaries_final']=json.loads(self.qmp.command(
+                        'qom-get',path='/machine',property='video-primary-boundaries-state'))
+                if self.data.get('probe_arguments',{}).get('video_source_ram'):
+                    self.data['video_source_ram_final']=json.loads(self.qmp.command(
+                        'qom-get',path='/machine',property='video-source-ram-state'))
+                if self.data.get('probe_arguments',{}).get('programmed_channel_clock'):
+                    self.data['programmed_channel_clock_final']=json.loads(self.qmp.command(
+                        'qom-get',path='/machine',property='event1508-programmed-clock-state'))
                 if self.data.get('probe_arguments',{}).get('task1500_global_pulses'):
                     self.data['task1500_global_pulses_final']=json.loads(self.qmp.command(
                         'qom-get',path='/machine',property='task1500-global-pulse-state'))
@@ -208,6 +247,9 @@ class ZRGuest(ContractGuest):
                               'config150d-state','config150d-latched','engine150d-readback-state',
                               'engine1542-state','engine1543-control-state','engine151-state',
                               'engine1518-state','engine1548-source-state')}
+                if self.data.get('probe_arguments',{}).get('serial8_batch_clock'):
+                    self.data['device_states']['serial8-write-clock-state']=json.loads(
+                        self.qmp.command('qom-get',path='/machine',property='serial8-write-clock-state'))
                 if self.data.get('probe_arguments',{}).get('audio_control_batch_clock'):
                     self.data['device_states']['serial-write-clock-state']=json.loads(
                         self.qmp.command('qom-get',path='/machine',property='serial-write-clock-state'))
@@ -524,7 +566,10 @@ def mode_input_ready(g,stage,waveform):
     return None
 
 
-def service_mcu(g,seconds,*,observer=None,key_input=False):
+def service_mcu(g,seconds,*,observer=None,key_input=False,bindings=None):
+    # Wire service is shared; instruction/data bindings belong to the exact
+    # firmware input. Keep the existing C1.11 default for current launchers.
+    bindings = BINDINGS if bindings is None else bindings
     from service_z9_mcu import Peer
     if g.data.get('battery_query_peer'):
         class BatteryQueryPeer(Peer):
@@ -533,7 +578,8 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                 if queue_reply(self,wire):return
                 super().queue_reply(wire)
         Peer=BatteryQueryPeer
-    peer = Peer(g,bindings=BINDINGS,config_reply=True,all_mode_replies=True)
+        (g.out/'zr_battery_query_peer.py').write_bytes((HERE/'zr_battery_query_peer.py').read_bytes())
+    peer = Peer(g,bindings=bindings,config_reply=True,all_mode_replies=True)
     if g.data.get('rtc_status_input'):
         from rtc_mcu_input import diagnostic_status
         body=diagnostic_status()
@@ -550,18 +596,23 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
             shutter.apply(body,family)
             return enqueue(body,family)
         peer.enqueue_external=with_shutter
+    pcm_input=None
+    if g.data['probe_arguments'].get('serial5_pcm_rates'):
+        from audio_pcm_input import AudioPCMInput
+        pcm_input=AudioPCMInput(g,g.data['probe_arguments']['serial5_pcm_rates'])
+        (g.out/'audio_pcm_input.py').write_bytes((HERE/'audio_pcm_input.py').read_bytes())
     peripheral_peers=[]
     if g.data.get('display_model'):
         from service_serial8 import WritePeer
-        peripheral_peers=[WritePeer(g,channel=c,wire_bits=c,object_base=BINDINGS['serial_objects'],
+        peripheral_peers=[WritePeer(g,channel=c,wire_bits=c,object_base=bindings['serial_objects'],
             allow_dummy_rx=(c==9),
             max_batches=g.data['probe_arguments'].get('serial_write_batches',1024),
             max_words=16*g.data['probe_arguments'].get('serial_write_batches',1024),
-            compact_observations=g.data['probe_arguments'].get('compact_serial_writes',False)) for c in (8,9)]
+            compact_observations=g.data['probe_arguments'].get('compact_serial_writes',False)) for c in (8,9) if c!=8 or not g.data['probe_arguments'].get('serial8_batch_clock')]
     if g.data['probe_arguments'].get('audio_control_clock'):
         from service_serial8 import WritePeer
         peripheral_peers.append(WritePeer(g,channel=2,wire_bits=16,
-            object_base=BINDINGS['serial_objects'],allow_dummy_rx=False,
+            object_base=bindings['serial_objects'],allow_dummy_rx=False,
             max_batches=g.data['probe_arguments'].get('serial_write_batches',1024),
             max_words=16*g.data['probe_arguments'].get('serial_write_batches',1024),
             compact_observations=g.data['probe_arguments'].get('compact_serial_writes',False)))
@@ -664,8 +715,10 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
         g.data['mode_completion_screen_gate']=completion_screen
     g.data['peer_reply_scope']='synthetic candidate replies to actual requests; no lens-status input'
     deadline = time.monotonic()+seconds
-    from native_log_guard import NativeLogGuard
+    from native_log_guard import NativeLogGuard,OriginalCPUExceptionGuard,OriginalCaptureWatchdogGuard
     fault_guard=NativeLogGuard(g.log_path)
+    original_exception_guard=OriginalCPUExceptionGuard()
+    capture_watchdog_guard=OriginalCaptureWatchdogGuard()
     for peripheral in peripheral_peers:peripheral.fault_guard=fault_guard
     (g.out/'native_log_guard.py').write_bytes((HERE/'native_log_guard.py').read_bytes())
     from zr_input_clock import InputClock
@@ -791,6 +844,15 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
             unknown=fault_guard.poll()
             g.data['host_log_guard']=fault_guard.receipt()
             if unknown:raise RuntimeError('unimplemented device during MCU service')
+            original_exception=original_exception_guard.poll(g.data.get('startup_observer',{}).get('stops',[]))
+            if original_exception is not None:
+                g.data['original_cpu_exception_early_failure']=original_exception
+                raise RuntimeError('Original CPU exception during MCU service; context preserved')
+            if g.data.get('mode_burst_min_frames'):
+                watchdog = capture_watchdog_guard.poll(g.data.get('startup_observer',{}).get('stops',[]))
+                if watchdog is not None:
+                    g.data['original_capture_watchdog_early_failure'] = watchdog
+                    raise RuntimeError('Original capture watchdog expired; context preserved')
             status = g.qmp.command('query-status')
             if not status['running']:
                 handled=observer.handle() if observer else False
@@ -805,13 +867,32 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                 scanout=json.loads(g.qmp.command('qom-get',path='/machine',property='engine1548-scanout-state'))
                 ready=initial_consumer_lcd_ready(consumer_rows(g.data),
                     g.data['key_input_candidate']['body_hex'],scanout)
+                if ready and g.data.get('mode_start_video_frames',0):
+                    required=g.data['mode_start_video_frames']
+                    if scanout.get('video_frames',0)<required:
+                        ready=None
+                    else:
+                        ready['lcd_video_frames_before_input']=scanout['video_frames']
+                        ready['video_frame_gate_is_image_acceptance']=False
+                if ready and g.data.get('mode_start_visible_ui'):
+                    from zr_input_start import visible_ui_ready
+                    candidate=g.runtime/'initial-visible-ui.ppm'
+                    g.qmp.command('screendump',filename=str(candidate))
+                    visible=visible_ui_ready(candidate)
+                    if visible:
+                        target=g.out/candidate.name
+                        target.write_bytes(candidate.read_bytes())
+                        ready['visible_overlay']=dict(visible,file=target.name,sha256=sha(target))
+                    else:ready=None
                 if ready:g.data['mode_key_input_gate']=ready
                 initial_input_ready_next=time.monotonic()+.5
-            gate=mode_input_ready(g,mode_stage,mode_waveform) if mode_waveform and mode_stage<mode_stage_limit else None
+            gate=mode_input_ready(g,mode_stage,mode_waveform) if mode_waveform and (mode_stage<mode_stage_limit or
+                (g.data.get('mode_post_capture_release_before_liveview') and mode_stage==mode_stage_limit)) else None
             if gate and recording_pacing and not recording_pacing.advance(mode_stage,input_clock):
                 gate=None
             visibility=g.data.get('mode_video_visibility_gate')
             if gate and visibility and mode_stage==visibility['after_state'] and not visibility['matched']:
+                visibility.setdefault('begun_virtual_seconds',input_clock.seconds)
                 if time.monotonic()>=video_ready_next:
                     from zr_video_ready import visible_video_ready
                     candidate=g.runtime/'video-ready-candidate.ppm'
@@ -826,6 +907,12 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                         with target.open('xb')as f:f.write(candidate.read_bytes())
                         visibility.update(matched=True,file=target.name,sha256=sha(target),evidence=ready)
                     video_ready_next=time.monotonic()+1
+                    if not ready and input_clock.seconds-visibility['begun_virtual_seconds'] > (g.data.get('mode_liveview_timeout_seconds') or 10):
+                        target=g.out/'zr-video-ready-timeout.ppm'
+                        target.write_bytes(candidate.read_bytes())
+                        visibility.update(timed_out=True,file=target.name,sha256=sha(target),
+                            elapsed_virtual_seconds=input_clock.seconds-visibility['begun_virtual_seconds'])
+                        raise RuntimeError('Original video visibility did not arrive within the configured live-view deadline')
                 if not visibility['matched']:gate=None
             if (gate and g.data.get('mode_precapture_liveview') and mode_stage and
                     mode_stage+1<mode_stage_limit and
@@ -865,7 +952,8 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                     baseline=g.data['capture_cycles'][-1]['baseline']
                     receipt=image_work(device_state('engine15e2-jpeg-state'),
                         device_state('engine151-raw-output-state'),
-                        g.data.get('jpeg_completed_native_dumps',[]),(6048,4032),baseline=baseline)
+                        g.data.get('jpeg_completed_native_dumps',[]),(6048,4032),baseline=baseline,
+                        minimum_captures=g.data.get('mode_burst_min_frames',1))
                     receipt['virtual_seconds']=input_clock.seconds
                     if receipt['ready']:
                         first=previous.get('first_ready_virtual_seconds',input_clock.seconds)
@@ -874,15 +962,23 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                     capture_ready_gates[str(mode_stage)]=receipt
                     capture_ready_next=time.monotonic()+.5
                 if not capture_ready_gates.get(str(mode_stage),{}).get('settled'):gate=None
-            if (gate and g.data.get('mode_post_capture_ready') and mode_stage>=2 and
-                    mode_waveform['input_states'][mode_stage-1]['label']=='half-press' and
-                    mode_waveform['input_states'][mode_stage-2]['label']=='menu-release' and
+            released_contact=bool(g.data.get('mode_post_capture_release_before_liveview'))
+            return_menu_sequence=None
+            if mode_waveform:
+                states=mode_waveform['input_states']
+                if (not released_contact and mode_stage>=2 and states[mode_stage-1]['label']=='half-press'
+                        and states[mode_stage-2]['label']=='menu-release'):
+                    return_menu_sequence=mode_stage-1
+                elif (released_contact and mode_stage>=3 and states[mode_stage-1]['label']=='half-release'
+                        and states[mode_stage-2]['label']=='half-press' and states[mode_stage-3]['label']=='menu-release'):
+                    return_menu_sequence=mode_stage-2
+            if (gate and g.data.get('mode_post_capture_ready') and return_menu_sequence is not None and
                     any(x.get('settled') for x in capture_ready_gates.values())):
                 key=str(mode_stage)
                 prior=liveview_return_gates.get(key,{})
                 if time.monotonic()>=liveview_return_next and not prior.get('ready'):
                     baseline=next(s for s in reversed(g.data['display_console_captures'])
-                                  if s['file']=='zr-key-state-%03d.ppm'%(mode_stage-1))
+                                  if s['file']=='zr-key-state-%03d.ppm'%return_menu_sequence)
                     raw=json.loads(g.qmp.command('qom-get',path='/machine',property='raw-pipeline-state'))
                     lcd=json.loads(g.qmp.command('qom-get',path='/machine',property='engine1548-scanout-state'))
                     ready=(raw['frames']>=baseline['raw']['frames']+8 and lcd['last_frame_has_video'] and
@@ -891,9 +987,11 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                         baseline_raw_frames=baseline['raw']['frames'],lcd_video_frames=lcd['video_frames'],
                         virtual_seconds=input_clock.seconds,
                         first_virtual_seconds=prior.get('first_virtual_seconds',input_clock.seconds),
-                        scope='hold external half contact until original menu return produces fresh RAW/LCD')
+                        scope=('wait after complete half press/release for original fresh RAW/LCD' if released_contact else
+                               'hold external half contact until original menu return produces fresh RAW/LCD'))
                     liveview_return_next=time.monotonic()+.5
-                    if ready:print('ZR fresh RAW/LCD after post-shot menu; releasing half contact',flush=True)
+                    if ready:print('ZR fresh RAW/LCD after post-shot menu and complete contact' if released_contact else
+                                   'ZR fresh RAW/LCD after post-shot menu; releasing half contact',flush=True)
                 current=liveview_return_gates.get(key,{})
                 if time.monotonic()>=workflow_progress_next:
                     (g.out/'workflow-progress.json').write_text(json.dumps(dict(
@@ -941,7 +1039,7 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                             receipt.update(matched=True,file=target.name,sha256=sha(target))
                         focus_next=time.monotonic()+.5
                     if not receipt['matched']:gate=None
-            if gate and g.data.get('mode_key_input_gate') and input_clock.running and input_clock.seconds>=mode_next:
+            if gate and mode_stage<mode_stage_limit and g.data.get('mode_key_input_gate') and input_clock.running and input_clock.seconds>=mode_next:
                 # enqueue_external may install a GDB breakpoint. RSP command
                 # transport is synchronous and requires a stopped guest.
                 # Preserve any real observer/peer stop before adding input.
@@ -952,6 +1050,10 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                 if mode_waveform.get('sequence')=='keys' and mode_stage:
                     from observe_z9_display import capture_console
                     capture_console(g,f'zr-key-state-{mode_stage:03d}')
+                    if (g.data.get('mode_burst_min_frames') or
+                            any(s['key'] in ('i','release-mode') for s in mode_waveform['input_states'])):
+                        from capture_zr_release_settings import capture as capture_release_settings
+                        capture_release_settings(g,mode_stage)
                 if mode_waveform.get('sequence') in ('fn2-left-center','keys'):
                     body=bytes.fromhex(mode_waveform['input_states'][mode_stage]['body_hex'])
                 else:
@@ -968,6 +1070,23 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                         queued_while_stopped=True,virtual_seconds=input_clock.seconds,
                         scope='actual device counters before enqueueing a new original full contact'))
                     observer.begin_capture_recovery()
+                if (g.data.get('mode_burst_min_frames') and
+                        mode_waveform['input_states'][mode_stage]['label']=='full-release'):
+                    # Snapshot before enqueueing release, while already stopped
+                    # for the normal input transaction. Terminal counters alone
+                    # cannot distinguish a held-burst stall from release cleanup.
+                    cycle=g.data['capture_cycles'][-1]
+                    if cycle['release_sequence']!=mode_stage+1:
+                        raise ValueError('Burst release does not match its full contact')
+                    names=('primary-d980-single-frame-state',
+                           'primary-d980-prepared-start-state',
+                           'engine151-raw-output-state','engine1540-frame-pass-state',
+                           'engine153-deferred-input-state','engine150c-state')
+                    cycle['before_release']=dict(virtual_seconds=input_clock.seconds,
+                        queued_while_stopped=True,release_enqueued=False,
+                        devices={name:json.loads(g.qmp.command('qom-get',
+                            path='/machine',property=name)) for name in names},
+                        scope='Actual device state while FULL remains held; no input or completion changes')
                 if (g.data.get('mode_post_capture_ready') and observer and mode_stage and
                         mode_waveform['input_states'][mode_stage]['label']=='half-press' and
                         mode_waveform['input_states'][mode_stage-1]['label']=='menu-release' and
@@ -984,6 +1103,14 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                         after_view_call=watermark(g.data),after_menu_call=menu_watermark(g.data),
                         after_consumer_call=consumer_watermark(g.data))
                 mode_stage+=1;mode_next=input_clock.seconds+g.data.get('mode_key_gap_seconds',1)
+                progress=dict(stage=mode_stage,total_states=mode_stage_limit,
+                    virtual_seconds=input_clock.seconds,accepted=False,
+                    scope='Queued original external input only; consumption and camera acceptance separate')
+                progress_path=g.out/'mode-stage-progress.json'
+                temporary=progress_path.with_suffix('.tmp')
+                temporary.write_text(json.dumps(progress,indent=2)+'\n');temporary.replace(progress_path)
+                if mode_stage%10==0 or mode_stage==mode_stage_limit:
+                    print('Native input stage '+str(mode_stage)+'/'+str(mode_stage_limit),flush=True)
                 if (mode_waveform.get('sequence')=='keys' and
                         mode_waveform['input_states'][mode_stage-1]['key'].startswith('selector')):
                     mode_next=max(mode_next,input_clock.seconds+2)
@@ -1019,6 +1146,8 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                 from zr_key_sequence import consumed,view_rows
                 last=mode_waveform['stages'][-1]
                 evidence=mode_input_ready(g,mode_stage,mode_waveform)
+                if (g.data.get('mode_post_capture_release_before_liveview') and
+                        not liveview_return_gates.get(str(mode_stage),{}).get('ready')):evidence=None
                 if evidence and completion_screen and not completion_screen['matched']:
                     if time.monotonic()>=completion_screen_next:
                         candidate=g.runtime/'mode-completion-candidate.ppm'
@@ -1085,6 +1214,7 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                     g.qmp.command('qom-set',path='/machine',property='event1508-global0-input',value=str(global_bits))
                     g.data['external_global0_status_input']['pulses']+=1
                 global_next=input_clock.seconds+global_period/1000
+            if pcm_input:pcm_input.tick(input_clock)
             if drain:drain.tick(input_clock)
             if channel_period and input_clock.running and input_clock.seconds>=channel_next:
                 channel=json.loads(g.qmp.command('qom-get',path='/machine',property='event1508-channel-state'))
@@ -1093,6 +1223,11 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
                     g.data['external_channel0_status_input']['pulses']+=1
                 channel_next=input_clock.seconds+channel_period/1000
             channels = json.loads(g.qmp.command('qom-get',path='/machine',property='serial-state'))
+            if g.data['probe_arguments'].get('serial8_batch_clock'):
+                peripheral_state=json.loads(g.qmp.command('qom-get',path='/machine',property='serial8-write-clock-state'))
+                if peripheral_state['fault']:
+                    g.data['serial8_batch_clock_rejection']=peripheral_state
+                    raise RuntimeError('original channel8 write clock rejected: '+peripheral_state['fault'])
             if g.data['probe_arguments'].get('audio_control_batch_clock'):
                 audio=json.loads(g.qmp.command('qom-get',path='/machine',property='serial-write-clock-state'))
                 if audio['fault']:
@@ -1123,10 +1258,15 @@ def service_mcu(g,seconds,*,observer=None,key_input=False):
             g.check('bounded key sequence consumed by distinct original handlers',mode_waveform['all_consumed'])
         peer.handle()
     finally:
-        g.qmp.command('stop')
-        fault_guard.close()
-        peer.close()
-        if observer:observer.close()
+        if getattr(g.qmp,'transport_failed',None):
+            # Preserve the original transport error. ContractGuest owns the
+            # final process/socket cleanup; a late reply cannot be reused.
+            g.data['service_cleanup_deferred_to_owner']=g.qmp.transport_failed
+        else:
+            g.qmp.command('stop')
+            fault_guard.close()
+            peer.close()
+            if observer:observer.close()
 
 
 def main():
@@ -1147,15 +1287,15 @@ def main():
     ap.add_argument('--input-clock',choices=('host','virtual'),default='host',
                     help='clock for peripheral status periods and key hold times; host run limit stays bounded')
     ap.add_argument('--status',choices=('zero','enum2'),default='enum2')
-    ap.add_argument('--post-seconds',type=int,choices=(0,10,20,30,60,90,180,360,600,900),default=0)
+    ap.add_argument('--post-seconds',type=int,choices=(0,10,20,30,60,90,180,360,600,900,1500),default=0)
     ap.add_argument('--mcu-peer',action='store_true',help='explicit bounded synthetic peer for actual requests')
     ap.add_argument('--rtc-status',action='store_true',
                     help='explicit deterministic family7 RTC sample; independently verified ZR decoder')
     ap.add_argument('--nor',action='store_true',help='existing volatile shared NOR model; original input file stays read only')
     ap.add_argument('--sd-empty',action='store_true',help='explicit inactive card-detect input; no media model')
     ap.add_argument('--battery',action='store_true',help='synthetic family4/type3 112-byte source1 status')
-    ap.add_argument('--battery-query-peer',action='store_true',help='request-bound declared status; no image/codec completion')
-    ap.add_argument('--retained-header-start',action='store_true',help='retired selected video header START; pixel readiness stays strict')
+    ap.add_argument('--battery-query-peer',action='store_true',help='request-bound repeat of declared family4/type3 status; no image/codec completion')
+    ap.add_argument('--retained-header-start',action='store_true',help='start exact previously accepted header program after STOP while adjacent configuration changes; data readiness stays strict')
     ap.add_argument('--battery-input',choices=('zero','source1'),default='source1',
                     help='explicit byte4 variant; source1 is a label, not verified battery semantics')
     ap.add_argument('--key-input',action='store_true',help='candidate family2/type1 complete state; requires peer')
@@ -1175,10 +1315,13 @@ def main():
                     help='external key readiness only: legacy photo modal or original initial MCU return plus active LCD scanout')
     ap.add_argument('--audio-control-clock',action='store_true',
                     help='opt-in ZR channel2/16bit clock for exact native writes with discarded RX; no PCM or codec identity replies')
+    ap.add_argument('--serial8-batch-clock',action='store_true',
+                    help='bounded original write-only channel8 clocks in QEMU virtual time')
     ap.add_argument('--audio-control-batch-clock',action='store_true',
                     help='default-off QEMU clock for bounded original audio write-only descriptors, every FIFO word validated; no codec/PCM')
     ap.add_argument('--serial5-audio-input',choices=('silence',),
                     help='explicit zero-amplitude RX/TX captured sample input; no PCM DMA or audio recording claimed')
+    ap.add_argument('--serial5-pcm-rates',help='explicit experimental stereo silence clocks channel:Hz,...; original PCM DMA/IRQ, no physical rate/packing claim')
     ap.add_argument('--serial5-audio-config',action='store_true',
                     help='default-off five-channel audio configuration and request readback, without PCM/DMA/IRQ completion')
     ap.add_argument('--serial5-audio-idle-drain',action='store_true',
@@ -1229,15 +1372,18 @@ def main():
                     help='explicit actual calibration context and generic same-CFA plan; no original ISA or pixel correction')
     ap.add_argument('--wave5-irq',type=int,default=0,
                     help='explicit original-driver GIC SPI binding; 0 retains polling, physical silicon identity unverified')
+    ap.add_argument('--primary-reset-queued-start',action='store_true',help='experimental preservation of a new unarmed capture across old idle reset; no automatic DMA')
     ap.add_argument('--raw-lossless14',action='store_true',
                     help='explicit shared F0 entropy encoder for verified 14-bit/2048-seed NEF profile; physical codec unverified')
     ap.add_argument('--capture-processor-ram',action='store_true',
                     help='private read-only modeled processor load RAM at owned stop; no code or completion supplied')
-    ap.add_argument('--mode-key-gap-seconds',type=int,choices=(0,1,3,5),default=1,
+    ap.add_argument('--mode-key-gap-seconds',type=float,choices=(0,0.2,1,3,5),default=1,
                     help='minimum host gap between completed input states; asynchronous menus may still be busy')
     ap.add_argument('--mode-final-press-seconds',type=int,choices=(2,10,30,60),
                     help='hold final external key before release; host timing, no guest state edits')
-    ap.add_argument('--mode-full-press-seconds',type=int,choices=(1,2,5,10),
+    ap.add_argument('--mode-burst-min-frames',type=int,choices=(8,),
+                    help='Require eight real RAW captures and complete previews per held contact; file audit remains separate')
+    ap.add_argument('--mode-full-press-seconds',type=int,choices=(1,2,5,10,30),
                     help='hold every full shutter press on the selected input clock, including before later menu keys')
     ap.add_argument('--mode-precapture-liveview',action='store_true',
                     help='hold the half contact preceding full exposure until new RAW/LCD exists')
@@ -1249,10 +1395,14 @@ def main():
                     help='wait for original VIDEO next-start/stop selector after each complete shutter release; not file acceptance')
     ap.add_argument('--mode-video-clip-seconds',type=int,choices=(5,10,30),default=5,
                     help='minimum selected-input-clock interval in native stop-selectable state before next shutter')
-    ap.add_argument('--mode-video-dispatch-timeout-seconds',type=int,choices=(30,60,90),default=60,
+    ap.add_argument('--mode-video-encoded-duration',action='store_true',
+                    help='add actual Wave5 picture-count/rational-rate pacing before STOP; HEVC/AVC only, not file acceptance')
+    ap.add_argument('--mode-video-dispatch-timeout-seconds',type=int,choices=(30,60,90,180,300),default=60,
                     help='bounded selected-input-clock deadline for original VIDEO dispatch selector transitions')
     ap.add_argument('--mode-liveview-timeout-seconds',type=int,choices=(10,15,30,60),
                     help='bounded virtual deadline for fresh post-shot menu-return frames')
+    ap.add_argument('--mode-post-capture-release-before-liveview',action='store_true',
+                    help='Complete the natural post-MENU half press/release before waiting for fresh RAW/LCD')
     ap.add_argument('--mode-post-capture-ready',action='store_true',
                     help='before post-shot keys, wait for the complete native RAW/JPEG graph and two virtual seconds')
     ap.add_argument('--mode-movie-release-gap-seconds',type=int,choices=(2,5,10),
@@ -1314,6 +1464,8 @@ def main():
                     help='functional input boundaries before preview DMA; requires shared RAW source timing')
     ap.add_argument('--stopped-source-reset',action='store_true',
                     help='explicit source-clock-gated RAW and primary reset contract candidate')
+    ap.add_argument('--engine153-deferred-input',action='store_true',help='wait for a fresh real RAW frame after a queued processing START')
+    ap.add_argument('--capture-frame-pool',action='store_true',help='bounded physical per-frame capture ownership; requires transition batch')
     ap.add_argument('--capture-transition-batch',action='store_true',
                     help='Acknowledged real-preview reset plus shared alternating NR/RAW/JPEG ports and capture rearm')
     ap.add_argument('--d980-config',action='store_true',
@@ -1338,6 +1490,16 @@ def main():
                     help='experimental source0 end after three actual internal RAW/ISP transfers; native client and W1C only')
     ap.add_argument('--video-secondary-isp',action='store_true',
                     help='bounded second-ISP internal-video pixel route; native geometry and owned RAW/YUV/IRQs required')
+    ap.add_argument('--capture-video-source-ram',action='store_true',
+                    help='read-only bounded source register/RAM snapshots at original recording dispatch gates')
+    ap.add_argument('--video-source-ram',action='store_true',
+                    help='explicit functional D8 YUV12 RAM to source1 RGB12 RAM; format/arithmetic hypothesis, not original ISP')
+    ap.add_argument('--video-main-output',action='store_true',
+                    help='configured fourth output and registered actual-RAM NV12 packed10 source view; no original YUVCMP')
+    ap.add_argument('--video-preview-ram',action='store_true',
+                    help='functional finite A1 packed10 RAM to three previews; not original ISP')
+    ap.add_argument('--programmed-channel-clock',action='store_true',
+                    help='functional committed waveform channels at the explicit sensor period; physical phases unverified')
     ap.add_argument('--video-secondary-sensor',action='store_true',
                     help='functional owned sensor samples after old video receiver/decoder retirement; physical route unproved')
     ap.add_argument('--video-secondary-source-end',action='store_true',
@@ -1346,6 +1508,14 @@ def main():
                     help='complete video receiver may arm before A1 enable; actual output remains supplier-gated')
     ap.add_argument('--video-primary-boundaries',action='store_true',
                     help='inferred primary input/output image boundaries only after owned RAW and six actual Y/UV transfers')
+    ap.add_argument('--deduplicated-card',action='store_true',help='Lossless host page deduplication for the private virtual card')
+    ap.add_argument('--video-raw-he-codec',action='store_true',help='Functional authored HE encoder and public inverse; original Nikon arithmetic unverified')
+    ap.add_argument('--video-raw-receiver-banks',action='store_true',
+                    help='functional two-bank RAW receiver, real quartet refill and explicit RAM repost; original timing/codec unverified')
+    ap.add_argument('--video-raw-packet-ring',action='store_true',
+                    help='bounded four actual RAW packet leases; producer ACK never consumes image data')
+    ap.add_argument('--video-primary-input-boundary',action='store_true',
+                    help='separate admitted decoded RAW/sensor sample from later ISP output; inferred staging, native IRQ/W1C')
     ap.add_argument('--isp-active-program',action='store_true',
                     help='admitted running ISP snapshot remains distinct from incomplete next START configuration')
     ap.add_argument('--video-peripheral-control',action='store_true',
@@ -1356,6 +1526,10 @@ def main():
                     help='explicit opaque RAM byte transport; no Nikon compression algorithm')
     ap.add_argument('--video-raw-transport',action='store_true',
                     help='explicit functional internal RAW/packet RAM/decoder/ISP transport; simulator codec, not Nikon compression')
+    ap.add_argument('--video-raw-queued-input',action='store_true',
+                    help='opt-in even-phase RAW crop and owned input before decoder START; functional WLVR only')
+    ap.add_argument('--video-secondary-parallel',action='store_true',
+                    help='independent functional secondary ISP sensor input alongside an owned RAW packet; stopped decoder required')
     ap.add_argument('--task1500-global-pulses',action='store_true',
                     help='explicit three native global1-to0 task controller pulse words; no invented data or IRQ')
     ap.add_argument('--engine1543-capture-control',action='store_true',
@@ -1372,6 +1546,8 @@ def main():
         help='Bounded append-only JSON keys/finished queue for native view-return pacing; no guest setting edits')
     ap.add_argument('--mode-key-release-gap-ms',type=int,choices=range(1001),default=0,
         help='Explicit external button release cooldown in the selected input clock; no firmware timing edits')
+    ap.add_argument('--nvme-card-mib',type=int,choices=(8192,16384,32768,65536),default=8192,
+        help='Fresh private virtual card capacity; 32/64GiB supports large RAW video workflows')
     ap.add_argument('--nvme-card',action='store_true',
         help='Fresh private exFAT NVMe recording medium over shared PCIe; actual file/decode acceptance remains separate')
     ap.add_argument('--engine151-capture-pixels',action='store_true',
@@ -1518,6 +1694,8 @@ def main():
     if args.key_input and not args.mcu_peer:ap.error('key input requires peer')
     if args.audio_control_clock and not args.mcu_peer:
         ap.error('audio control clock requires the bounded native peer session')
+    if args.serial8_batch_clock and (not args.mcu_peer or not args.shared_z9_build or not args.display):
+        ap.error('serial8 batch clock requires original MCU service, display peer and shared build')
     if args.audio_control_batch_clock and (not args.mcu_peer or not args.shared_z9_build or args.audio_control_clock):
         ap.error('batched audio clock requires shared build and peer, and excludes the per-write host clock')
     if args.engine151_video_stream and not (args.engine1543_video_control and args.capture_raw_pipeline):
@@ -1528,6 +1706,16 @@ def main():
         ap.error('video source end requires shared internal RAW and video ISP')
     if args.video_secondary_isp and not (args.shared_z9_build and args.video_raw_transport and args.engine151_video_stream):
         ap.error('secondary video ISP requires shared internal RAW and video ISP')
+    if args.capture_video_source_ram and not (args.shared_z9_build and args.mode_video_dispatch_pacing):
+        ap.error('source RAM capture requires the shared build and original recording dispatch pacing')
+    if args.video_source_ram and not (args.shared_z9_build and args.engine151_video_stream and args.video_raw_transport):
+        ap.error('D8 source RAM model requires shared original video input and RAW/ISP transport')
+    if args.video_main_output and not (args.shared_z9_build and args.engine151_video_stream and args.video_raw_transport):
+        ap.error('main output requires shared original video input and RAW/ISP transport')
+    if args.video_preview_ram and not (args.shared_z9_build and args.video_main_output):
+        ap.error('video preview RAM requires shared main output')
+    if args.programmed_channel_clock and not (args.shared_z9_build and args.shared_sensor_timing and args.output_group1508):
+        ap.error('programmed channel clock requires shared sensor timing and original output-group controls')
     if args.video_secondary_sensor and not args.video_secondary_isp:
         ap.error('secondary sensor input requires the declared second video ISP route')
     if args.video_secondary_source_end and not args.video_secondary_sensor:
@@ -1536,6 +1724,12 @@ def main():
         ap.error('video receiver ordering requires the declared video ISP stream')
     if args.video_primary_boundaries and not (args.shared_z9_build and args.video_raw_transport and args.engine151_video_stream):
         ap.error('video primary boundaries require shared actual internal RAW and video ISP')
+    if args.video_raw_receiver_banks and not args.video_raw_packet_ring:
+        ap.error('RAW receiver banks require bounded actual packet metadata')
+    if args.video_raw_packet_ring and not (args.video_raw_transport and args.video_raw_queued_input):
+        ap.error('RAW packet ring requires actual queued internal RAW transport')
+    if args.video_primary_input_boundary and not args.video_primary_boundaries:
+        ap.error('separate RAW input requires the existing primary boundaries and complete RAW transport')
     if args.isp_active_program and not (args.shared_z9_build and args.video_secondary_isp):
         ap.error('active ISP program requires the shared declared secondary video route')
     if args.video_peripheral_control and not (args.shared_z9_build and args.engine151_video_stream and args.engine153_config):
@@ -1549,6 +1743,12 @@ def main():
         ap.error('internal video RAW requires source/receiver/decoder/ISP and excludes opaque byte copy')
     if args.engine1543_video_control and (not args.shared_z9_build or not args.engine1543_capture_control):
         ap.error('video headers require shared build and original1543 capture control')
+    if args.serial5_pcm_rates:
+        if not (args.serial5_audio_config and args.serial5_audio_input=='silence' and args.mcu_peer and args.input_clock=='virtual'):
+            ap.error('PCM requires explicit silence, audio configuration, peer and virtual clock')
+        from audio_pcm_input import parse_rates
+        try:parse_rates(args.serial5_pcm_rates)
+        except (ValueError,TypeError):ap.error('PCM rates require distinct channel:Hz pairs')
     if args.serial5_audio_input and not args.serial5_audio_config:
         ap.error('captured audio sample input needs the five-channel config model')
     if args.serial5_audio_idle_drain and not args.serial5_audio_config:
@@ -1604,13 +1804,22 @@ def main():
             ap.error('continuous shutter requires a fixed key sequence')
         from zr_key_sequence import input_states
         input_states(mode_keys,continuous_shutter=True)
+    if args.mode_burst_min_frames and not (args.mode_continuous_shutter and
+            args.mode_post_capture_ready and args.mode_full_press_seconds in (10,30) and
+            mode_keys.count('full')==2 and not args.mode_video_dispatch_pacing):
+        ap.error('Burst observation requires two bounded continuous full holds (10 or 30 seconds) and full PHOTO recovery gates')
+    if args.mode_video_encoded_duration and not (args.mode_video_dispatch_pacing and args.wave5_vpu):
+        ap.error('Encoded-duration pacing requires the native VIDEO dispatch gate and Wave5')
     if args.mode_video_dispatch_pacing:
         if not args.mode_continuous_shutter or args.mode_post_capture_ready or args.mode_keys_file:
             ap.error('VIDEO dispatch pacing requires fixed continuous shutter and no PHOTO file gates')
         if mode_keys.count('full')%2 or not args.wave5_vpu:
             ap.error('VIDEO dispatch pacing requires paired full contacts and the modeled video interface')
-    if args.mode_liveview_timeout_seconds and not args.mode_post_capture_ready:
-        ap.error('liveview deadline requires post-shot image/menu readiness gates')
+    if args.mode_liveview_timeout_seconds and not (
+            args.mode_post_capture_ready or args.mode_video_ready_after_state is not None):
+        ap.error('liveview deadline requires a post-shot or video visibility gate')
+    if args.mode_post_capture_release_before_liveview and not args.mode_post_capture_ready:
+        ap.error('Released-contact recovery requires post-capture image/recovery gates')
     if args.mode_post_capture_ready and (args.mode_key_sequence!='keys' or not args.capture_raw_pipeline):
         ap.error('post-shot image gate requires a full RAW key recipe')
     if args.mode_post_capture_ready and not 1<=mode_keys.count('full')<=8:
@@ -1701,6 +1910,8 @@ def main():
         ap.error('150d diagnostic readback requires --config150d')
     props = (FIXTURES+',graphics-image-model=on,graphics-path-model=on,graphics-clear-model=on,'
         'multi-io-counter-model=on,adc-fixture=on,adc-input=256:512:768:1023')
+    if args.serial8_batch_clock:
+        props+=f',serial8-write-clock-peer=8:{BINDINGS["serial_objects"]+8*0x68:x}:{16*args.serial_write_batches}'
     if args.audio_control_batch_clock:
         props+=f',serial-write-clock-peer=2:{BINDINGS["serial_objects"]+2*0x68:x}:{16*args.serial_write_batches}'
     if args.sd_empty:props+=',zr-sd-empty-fixture=on'
@@ -1816,6 +2027,14 @@ def main():
         props+=',video-source-end-model=on'
     if args.video_secondary_isp:
         props+=',video-secondary-isp-model=on'
+    if args.video_source_ram:
+        props+=',video-source-ram-model=on'
+    if args.video_main_output:
+        props+=',video-main-output-model=on'
+    if args.video_preview_ram:
+        props+=',video-preview-ram-model=on'
+    if args.programmed_channel_clock:
+        props+=',event1508-programmed-clock-model=on'
     if args.video_secondary_sensor:
         props+=',video-secondary-sensor-model=on'
     if args.video_secondary_source_end:
@@ -1824,6 +2043,12 @@ def main():
         props+=',video-receiver-before-supplier-model=on'
     if args.video_primary_boundaries:
         props+=',video-primary-boundaries-model=on'
+    if args.video_raw_receiver_banks:
+        props+=',video-raw-receiver-banks-model=on'
+    if args.video_raw_packet_ring:
+        props+=',video-raw-packet-ring-model=on'
+    if args.video_primary_input_boundary:
+        props+=',video-primary-input-boundary-model=on'
     if args.isp_active_program:
         props+=',engine151-active-program-model=on'
     if args.video_peripheral_control:
@@ -1834,6 +2059,15 @@ def main():
         props+=',engine152c-stream-copy-model=on'
     if args.video_raw_transport:
         props+=',video-raw-transport-model=on'
+    if args.video_raw_he_codec:
+        props+=',video-raw-he-codec-model=on'
+    if args.video_raw_queued_input:
+        if not args.video_raw_transport:ap.error('queued input requires the explicit video RAW transport')
+        props+=',video-raw-queued-input-model=on'
+    if args.video_secondary_parallel:
+        if not (args.video_raw_queued_input and args.video_secondary_sensor):
+            ap.error('parallel secondary input requires declared queued RAW and secondary sensor models')
+        props+=',video-secondary-parallel-model=on'
     if args.task1500_global_pulses:
         if not args.shared_z9_build:ap.error('task global pulses require the declared shared build')
         props+=',task1500-global-pulse-model=on'
@@ -1894,6 +2128,9 @@ def main():
     if args.engine15e2_jpeg:
         if not (args.engine15e2_config and args.engine151_capture_pixels):ap.error('15e2 JPEG requires config and actual151 pixels')
         props+=',engine15e2-jpeg-model=on'
+    if args.primary_reset_queued_start:
+        if not args.capture_pipeline:ap.error('queued start policy requires the complete capture pipeline')
+        props+=',primary-reset-queued-start-model=on'
     if args.capture_pipeline:
         if not (args.shared_z9_build and args.engine15e2_jpeg and
                 (args.engine153_frame_pass or args.capture_raw_pipeline)
@@ -1927,6 +2164,12 @@ def main():
         props+=''.join(','+name+'-model=on' for name in (
             'primary-preview-reset','engine153-alternate-bank','capture-stream-rearm',
             'engine1540-alternate-bank','engine15e2-alternate-bank','primary-d980-live-single'))
+    if args.engine153_deferred_input:
+        if not args.capture_transition_batch:ap.error('Deferred RAW processing requires transition batch')
+        props+=',engine153-deferred-input-model=on'
+    if args.capture_frame_pool:
+        if not args.capture_transition_batch:ap.error('Capture frame pool requires the complete transition batch')
+        props+=',capture-frame-pool-model=on'
     if args.yuvcmp_config:
         props+=',yuvcmp-config-model=on'
     if args.yuvcmp_channels:
@@ -1956,7 +2199,7 @@ def main():
     if args.nor:props+=',nor-model=on'
     if args.retained_header_start:
         if not (args.shared_z9_build and args.engine1543_video_control):
-            ap.error('retained header START requires shared video header control')
+            ap.error('retained header START requires declared shared video header control')
         props+=',engine1543-retained-start-model=on'
     if args.service_core_events:props+=',service-core-event-model=on'
     g = ZRGuest(args.name,props,intercept_irq=False,ram_mib=1024,
@@ -1970,7 +2213,11 @@ def main():
             ap.error('Recording card requires the shared complete capture pipeline')
         from virtual_recording_card import create
         card=g.runtime/'capture-card.raw'
-        g.data['private_virtual_card']=create(card,'exfat')
+        g.data['private_virtual_card']=create(card,'exfat',size_mib=args.nvme_card_mib)
+        if args.deduplicated_card:
+            from deduplicated_card import attach
+            g.data['private_card_storage']=attach(card)
+            (g.out/'deduplicated_card.py').write_bytes((HERE/'deduplicated_card.py').read_bytes())
         g.command[g.command.index('-M')+1]+=(',pcie-link-diagnostic-mask=4,'
             'pcie-dbi-model=on,pcie-ram-dma-input=on,pcie-image-ram-dma-input=on,pcie-intx-model=on')
         events=g.runtime/'storage-dma.events'
@@ -2028,7 +2275,7 @@ def main():
         capture_tasks=args.tasks,lcd_control_peer=args.lcd_control_peer,
         orientation_peer=args.orientation_peer,secondary_model=args.secondary_model)
     if args.battery_query_peer and not (args.battery and args.mcu_peer):
-        ap.error('battery query peer requires boot battery input and MCU peer')
+        ap.error('battery query peer requires explicit boot battery input and original MCU peer')
     g.data['battery_query_peer']=args.battery_query_peer
     g.data['battery_input_variant']=args.battery_input if args.battery else None
     g.data['trace_sequence_resources']=args.trace_sequence_resources
@@ -2068,6 +2315,7 @@ def main():
     if args.mode_key_input:g.data['mode_key_gap_seconds']=args.mode_key_gap_seconds
     if args.mode_final_press_seconds:g.data['mode_final_press_seconds']=args.mode_final_press_seconds
     if args.mode_full_press_seconds:g.data['mode_full_press_seconds']=args.mode_full_press_seconds
+    if args.mode_burst_min_frames:g.data['mode_burst_min_frames']=args.mode_burst_min_frames
     if args.mode_precapture_liveview:
         g.data['mode_precapture_liveview']=True
         g.data['mode_precapture_liveview_frames']=args.mode_precapture_liveview_frames
@@ -2077,6 +2325,7 @@ def main():
             mode_video_dispatch_timeout_seconds=args.mode_video_dispatch_timeout_seconds)
     if args.mode_liveview_timeout_seconds:g.data['mode_liveview_timeout_seconds']=args.mode_liveview_timeout_seconds
     if args.mode_post_capture_ready:g.data['mode_post_capture_ready']=True
+    if args.mode_post_capture_release_before_liveview:g.data['mode_post_capture_release_before_liveview']=True
     if args.mode_movie_release_gap_seconds:g.data['mode_movie_release_gap_seconds']=args.mode_movie_release_gap_seconds
     if args.mode_focus_after_state:g.data['mode_focus_after_state']=focus_gates
     if args.mode_tab_after_state:g.data['mode_tab_after_state']=tab_gates

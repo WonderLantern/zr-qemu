@@ -8,15 +8,15 @@
 #include <qemu-plugin.h>
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
-typedef struct { uint64_t pc, skip_x0; bool filtered; uint64_t skipped; char name[64]; } Point;
+typedef struct { uint64_t pc, skip_x0; bool filtered, flush; uint64_t skipped; char name[64]; } Point;
 typedef struct { uint64_t address; unsigned bytes; bool from_register; char name[64]; } Region;
 typedef struct {
     struct qemu_plugin_register *reg[32];
     GByteArray *buffer;
 } CPU;
 static CPU cpus[4];
-static Point points[64];
-static Region regions[8];
+static Point points[128];
+static Region regions[10];
 static unsigned point_count, region_count;
 static FILE *out;
 static GMutex lock;
@@ -86,7 +86,9 @@ static void executed(unsigned int index, void *opaque)
         fwrite(hex, 1, region->bytes * 2 + 2, out);
     }
     fputs("}}\n", out);
-    if (!(records % 64)) fflush(out);
+    /* Host input pacing must see a terminal callback even if no later
+     * event fills the stdio buffer. Other observations retain batching. */
+    if (point->flush || !(records % 64)) fflush(out);
     g_mutex_unlock(&lock);
 }
 static void translated(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
@@ -149,8 +151,13 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
                 address >= 0x40160000 && address < 0x45000000 && !(address & 3)) {
             Point *p = &points[point_count++]; p->pc = address; g_strlcpy(p->name, name, sizeof(p->name));
         } else if (type == 'L' && !strcmp(name, "maximum_records") && bytes == 0 &&
-                   !limit_set && address >= 64 && address <= 65536) {
+                   !limit_set && address >= 64 && address <= 262144) {
             maximum_records = address; limit_set = true;
+        } else if (type == 'F' && address == 0 && bytes == 0) {
+            Point *selected = NULL;
+            for (unsigned i = 0; i < point_count; i++) if (!strcmp(points[i].name, name)) selected = &points[i];
+            if (!selected || selected->flush) { valid = false; break; }
+            selected->flush = true;
         } else if (type == 'S' && bytes == 0) {
             Point *selected = NULL;
             for (unsigned i = 0; i < point_count; i++) if (!strcmp(points[i].name, name)) selected = &points[i];
