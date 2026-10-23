@@ -1,7 +1,11 @@
 # WonderLantern ZR QEMU
 
+**2026-10-23: shared441 development source update.** See [current changes, whole-workflow evidence and limitations](docs/shared441.md) for 1/1000 bursts, ZR Main10/R3D, the receiver fix and the still-failing pre-release path. This portable rebuild does not inherit older camera qualifications. Bring your own firmware; original ISP/DSP/codec algorithms remain unimplemented.
 
-[Portable ZR recording qualification / 公开包录制验收](docs/recording-qualification221.json)
+## Historical shared221 and earlier usage/qualification
+
+
+[Historical shared221 ZR recording qualification / 旧版录制验收](docs/recording-qualification221.json)
 
 [中文](README.zh-CN.md) · [Results and limitations](docs/shared221.md) · [Local inputs](docs/zr-inputs.md) · [Build](docs/build.md) · [Rights and licenses](NOTICE.md)
 
@@ -19,7 +23,7 @@ the native profile also needs the user's fingerprinted captured resources.
 Read [exact local input requirements](docs/zr-inputs.md) before building a
 native camera workflow. Missing inputs fail explicitly.
 
-## Verified local recording results
+## Historical shared221 recording results
 
 | Format, original C1.11 application | First clip | Second clip |
 | --- | --- | --- |
@@ -37,7 +41,7 @@ source snapshot; a build or START callback alone never qualifies recording.
 **Arithmetic remains functional.** HE is authored forward coding plus a pinned
 public LibRaw inverse; HEVC/AVC use x265/x264; ISP/JPEG use functional host
 implementations. Original Nikon ISP/DSP/codec algorithms are not executed or
-qualified. R3D dark/color clipping is uncalibrated. The current Main10 source
+qualified. R3D dark/color clipping is uncalibrated. The shared221 Main10 source
 has8bit-effective precision even though the actual HEVC syntax is10bit.
 See [complete scopes, tests and remaining work](docs/shared221.md).
 

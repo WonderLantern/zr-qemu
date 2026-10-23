@@ -1,7 +1,11 @@
 # WonderLantern ZR QEMU
 
+**2026-10-23：shared441 开发源码更新。** 新功能、双机1/1000连拍和ZR双格式录像的本地验证，以及尚未通过的预拍摄，统一见[最新状态与限制](docs/shared441.md)。当前公开重构建不自动继承旧整机验收；用户自行提供固件，原厂DSP/ISP/编码算法尚未实现。
 
-[Portable ZR recording qualification / 公开包录制验收](docs/recording-qualification221.json)
+## 以下为 shared221 及更早版本的使用说明与历史验收
+
+
+[Historical shared221 ZR recording qualification / 旧版录制验收](docs/recording-qualification221.json)
 
 [English / 完整构建启动命令](README.md) · [当前证据、实现与限制](docs/shared221.md) · [本地输入要求](docs/zr-inputs.md)
 
@@ -10,7 +14,7 @@ QEMU10.2.4上的ZR C1.11研究模拟器，复用Z9的共享EXPEED7设备。菜�
 研究学习，不代表尼康/RED官方产品；尊重其权益，不公开其私有代码。
 源码包不包含固件、ROM/校准/字体/图标数据、厂商SDK、照片或录像。
 
-## 本地完整录像验收
+## shared221 历史完整录像验收
 
 |格式|第一段|第二段|
 |---|---|---|
@@ -27,7 +31,7 @@ QEMU10.2.4上的ZR C1.11研究模拟器，复用Z9的共享EXPEED7设备。菜�
 
 **这仍是功能后端。** HE为原创正向编码及公开LibRaw逆变换，HEVC/AVC
 使用x265/x264，ISP/JPEG使用功能实现；原厂ISP/DSP/H265/RAW/JPEG算法
-均未验收。R3D暗部/色彩仍未校准；Main10确实为10bit语法，但当前源的
+均未验收。R3D暗部/色彩仍未校准；Main10确实为10bit语法，但该旧版源的
 有效精度来自8bit功能图像链路。不能宣传为物理传感器有效精度或原厂效果。
 
 ## 构建和运行
